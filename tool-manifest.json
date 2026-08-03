@@ -79,6 +79,7 @@
     "search_docs",
     "set_doc_property",
     "sign_in",
+    "update_block",
     "update_collection",
     "update_collection_rules",
     "update_comment",

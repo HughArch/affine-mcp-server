@@ -9017,6 +9017,169 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     }
   };
 
+  const CALLOUT_COLOR_TOKENS = [
+    "transparent",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "teal",
+    "blue",
+    "purple",
+    "magenta",
+    "grey",
+    "black",
+    "white",
+  ] as const;
+
+  const updateBlockHandler = async (params: {
+    workspaceId?: string;
+    docId: string;
+    blockId: string;
+    calloutColor?: string;
+    calloutIcon?: string;
+    collapsed?: boolean;
+    textAlign?: "left" | "center" | "right" | "justify";
+    textColor?: string;
+    textBackground?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
+    code?: boolean;
+  }) => {
+    const workspaceId = params.workspaceId || defaults.workspaceId;
+    if (!workspaceId) {
+      throw new Error(
+        "workspaceId is required. Provide it as a parameter or set AFFINE_WORKSPACE_ID in environment."
+      );
+    }
+
+    const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
+    const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
+    const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
+    try {
+      await joinWorkspace(socket, workspaceId);
+      const doc = new Y.Doc();
+      const snapshot = await loadDoc(socket, workspaceId, params.docId);
+      if (!snapshot.missing) {
+        throw new Error(`Document '${params.docId}' not found or has no content.`);
+      }
+      Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
+      const prevSV = Y.encodeStateVector(doc);
+      const blocks = doc.getMap("blocks") as Y.Map<any>;
+      const block = blocks.get(params.blockId);
+      if (!(block instanceof Y.Map)) {
+        throw new Error(`Block '${params.blockId}' not found.`);
+      }
+      const flavour = block.get("sys:flavour");
+
+      const changed: string[] = [];
+      const ignored: string[] = [];
+
+      if (params.calloutColor !== undefined) {
+        if (flavour === "affine:callout") {
+          if (!(CALLOUT_COLOR_TOKENS as readonly string[]).includes(params.calloutColor)) {
+            throw new Error(`Invalid calloutColor '${params.calloutColor}'. Valid values: ${CALLOUT_COLOR_TOKENS.join(" / ")}.`);
+          }
+          block.set("prop:backgroundColorName", params.calloutColor);
+          changed.push("calloutColor");
+        } else {
+          ignored.push("calloutColor");
+        }
+      }
+
+      if (params.calloutIcon !== undefined) {
+        if (flavour === "affine:callout") {
+          block.set("prop:icon", { type: "emoji", unicode: params.calloutIcon });
+          changed.push("calloutIcon");
+        } else {
+          ignored.push("calloutIcon");
+        }
+      }
+
+      if (params.collapsed !== undefined) {
+        if (flavour === "affine:list") {
+          if (params.collapsed) {
+            block.set("prop:collapsed", true);
+          } else {
+            // Remove the prop so BlockSuite treats it as expanded (default).
+            if (block.has("prop:collapsed")) {
+              block.delete("prop:collapsed");
+            }
+          }
+          changed.push("collapsed");
+        } else {
+          ignored.push("collapsed");
+        }
+      }
+
+      if (params.textAlign !== undefined) {
+        if (flavour === "affine:paragraph" || flavour === "affine:list") {
+          block.set("prop:textAlign", params.textAlign);
+          changed.push("textAlign");
+        } else {
+          ignored.push("textAlign");
+        }
+      }
+
+      // Inline rich-text attributes applied to the block's entire text run.
+      // true = set the attribute, false = remove it, string = set with value
+      // ('' removes for color/background).
+      const textProp = block.get("prop:text");
+      const textIsRich = textProp instanceof Y.Text;
+      const inlineFieldSpecs = [
+        ["textColor", "color"] as const,
+        ["textBackground", "background"] as const,
+        ["bold", "bold"] as const,
+        ["italic", "italic"] as const,
+        ["underline", "underline"] as const,
+        ["strike", "strike"] as const,
+        ["code", "code"] as const,
+      ];
+      const anyInlineProvided = inlineFieldSpecs.some(([paramName]) => params[paramName as keyof typeof params] !== undefined);
+      if (anyInlineProvided) {
+        if (textIsRich) {
+          let deltas = textProp.toDelta() as TextDelta[];
+          for (const [paramName, attrName] of inlineFieldSpecs) {
+            const value = params[paramName as keyof typeof params];
+            if (value === undefined) continue;
+            const remove =
+              value === false || (typeof value === "string" && value.trim().length === 0);
+            deltas = deltas.map(delta => {
+              const attributes: Record<string, unknown> = { ...(delta.attributes || {}) };
+              if (remove) {
+                delete attributes[attrName];
+              } else {
+                attributes[attrName] = value === true ? true : (value as string).trim();
+              }
+              return { insert: delta.insert, attributes };
+            });
+            changed.push(paramName);
+          }
+          block.set("prop:text", makeText(deltas));
+        } else {
+          for (const [paramName] of inlineFieldSpecs) {
+            if (params[paramName as keyof typeof params] !== undefined) {
+              ignored.push(paramName);
+            }
+          }
+        }
+      }
+
+      const delta = Y.encodeStateAsUpdate(doc, prevSV);
+      await pushDocUpdate(
+        socket,
+        workspaceId,
+        params.docId,
+        Buffer.from(delta).toString("base64")
+      );
+      return text({ updated: changed.length > 0, blockId: params.blockId, flavour, changed, ignored });
+    } finally {
+      socket.disconnect();
+    }
+  };
+
   const updateEdgelessBlockHandler = async (params: {
     workspaceId?: string;
     docId: string;
@@ -9588,6 +9751,32 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       },
     },
     updateEdgelessBlockHandler as any
+  );
+
+  server.registerTool(
+    "update_block",
+    {
+      title: "Update Block",
+      description:
+        "Partially update document block properties by id. Supported fields depend on the block flavour: calloutColor/calloutIcon for affine:callout (background palette token and emoji icon), collapsed for affine:list (fold/unfold child blocks), textAlign for affine:paragraph/affine:list (left/center/right/justify), and rich-text format fields (textColor/textBackground/bold/italic/underline/strike/code) for any block with text. Fields that don't apply to the block's flavour come back under 'ignored'.",
+      inputSchema: {
+        workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
+        docId: DocId.describe("Document ID"),
+        blockId: z.string().min(1).describe("Block id to update."),
+        calloutColor: z.string().optional().describe("Callout only. Background palette token: transparent / red / orange / yellow / green / teal / blue / purple / magenta / grey / black / white. Maps to AFFiNE prop:backgroundColorName."),
+        calloutIcon: z.string().optional().describe("Callout only. Emoji for the callout icon (e.g. '📘', '⚠️')."),
+        collapsed: z.boolean().optional().describe("List only. true = fold child blocks (prop:collapsed=true), false = expand (remove prop:collapsed)."),
+        textAlign: z.enum(["left", "center", "right", "justify"]).optional().describe("Paragraph/list only. Sets prop:textAlign (left/center/right/justify)."),
+        textColor: z.string().optional().describe("Any text-bearing block. Applies a color to the block's entire text run (delta attribute 'color'). Accepts AFFiNE palette tokens (red/blue/...) or hex like '#ff0000'. Pass '' to clear."),
+        textBackground: z.string().optional().describe("Any text-bearing block. Applies a highlight background to the block's entire text run (delta attribute 'background'). Accepts palette tokens or hex. Pass '' to clear."),
+        bold: z.boolean().optional().describe("Any text-bearing block. true = apply bold to the whole text, false = remove bold."),
+        italic: z.boolean().optional().describe("Any text-bearing block. true = apply italic, false = remove italic."),
+        underline: z.boolean().optional().describe("Any text-bearing block. true = apply underline, false = remove underline."),
+        strike: z.boolean().optional().describe("Any text-bearing block. true = apply strikethrough, false = remove strikethrough."),
+        code: z.boolean().optional().describe("Any text-bearing block. true = apply inline code, false = remove inline code."),
+      },
+    },
+    updateBlockHandler as any
   );
 
   server.registerTool(

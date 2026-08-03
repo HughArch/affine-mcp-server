@@ -34,11 +34,11 @@ COPY --chown=affine:affine tool-manifest.json ./
 
 USER affine
 
-EXPOSE 3000
+EXPOSE 3002
 
 ENV MCP_TRANSPORT=http \
     AFFINE_MCP_HTTP_HOST=0.0.0.0 \
-    PORT=3000
+    PORT=3002
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:${PORT}/healthz || exit 1
