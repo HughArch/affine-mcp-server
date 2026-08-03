@@ -9032,6 +9032,115 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     "white",
   ] as const;
 
+  type TableCellValue = string | { text?: string; deltas?: TextDelta[] };
+  type TableCellFormat = {
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
+    code?: boolean;
+    color?: string;
+    background?: string;
+  };
+  type TableUpdateInput = {
+    // Keys use 'rowIndex:columnIndex' (0-based).
+    cells?: Record<string, TableCellValue>;
+    columnWidths?: Record<string, number>;
+    rowHeights?: Record<string, number>;
+    rowBackgrounds?: Record<string, string>;
+    columnBackgrounds?: Record<string, string>;
+    cellFormats?: Record<string, TableCellFormat>;
+  };
+
+  // Column widths are clamped to [ColumnMinWidth, ColumnMaxWidth] = [60, 240]
+  // px, mirroring blocksuite/affine/blocks/table/src/consts.ts. Row heights are
+  // not stored by AFFiNE (pure CSS layout), so rowHeights is accepted but
+  // reported under `ignored`.
+
+  // Resolve ordered row/column ids for an affine:table block, supporting both
+  // the nested Y.Map layout and the flat dot-notation layout that extractTableData
+  // already handles.
+  function readTableRowColumnIds(block: Y.Map<any>): { rows: string[]; columns: string[] } {
+    const compareOrder = (left: string, right: string) => {
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    };
+    let rowEntries = mapEntries(block.get("prop:rows"))
+      .map(([rowId, payload]) => ({
+        rowId,
+        order:
+          payload && typeof payload === "object" && typeof (payload as any).order === "string"
+            ? (payload as any).order
+            : rowId,
+      }))
+      .sort((a, b) => compareOrder(a.order, b.order));
+    let columnEntries = mapEntries(block.get("prop:columns"))
+      .map(([columnId, payload]) => ({
+        columnId,
+        order:
+          payload && typeof payload === "object" && typeof (payload as any).order === "string"
+            ? (payload as any).order
+            : columnId,
+      }))
+      .sort((a, b) => compareOrder(a.order, b.order));
+
+    if (rowEntries.length === 0 || columnEntries.length === 0) {
+      const flatRows = new Map<string, string>();
+      const flatColumns = new Map<string, string>();
+      block.forEach((value: unknown, key: string) => {
+        const rowMatch = key.match(/^prop:rows\.([^.]+)\.order$/);
+        if (rowMatch) {
+          flatRows.set(rowMatch[1], typeof value === "string" ? value : rowMatch[1]);
+          return;
+        }
+        const colMatch = key.match(/^prop:columns\.([^.]+)\.order$/);
+        if (colMatch) {
+          flatColumns.set(colMatch[1], typeof value === "string" ? value : colMatch[1]);
+        }
+      });
+      if (flatRows.size > 0 && flatColumns.size > 0) {
+        rowEntries = Array.from(flatRows.entries())
+          .map(([rowId, order]) => ({ rowId, order }))
+          .sort((a, b) => compareOrder(a.order, b.order));
+        columnEntries = Array.from(flatColumns.entries())
+          .map(([columnId, order]) => ({ columnId, order }))
+          .sort((a, b) => compareOrder(a.order, b.order));
+      }
+    }
+    return { rows: rowEntries.map(entry => entry.rowId), columns: columnEntries.map(entry => entry.columnId) };
+  }
+
+  const TABLE_CELL_KEY_PATTERN = /^(\d+):(\d+)$/;
+  const applyTableCellFormats = (block: Y.Map<any>, rowId: string, columnId: string, format: TableCellFormat): void => {
+    const cellKey = `prop:cells.${rowId}:${columnId}.text`;
+    const existing = block.get(cellKey);
+    const deltas: TextDelta[] = existing instanceof Y.Text ? (existing.toDelta() as TextDelta[]) : [];
+    const base = deltas.length > 0 ? deltas : [{ insert: "" }];
+    const specs: Array<[string, unknown]> = [
+      ["bold", format.bold],
+      ["italic", format.italic],
+      ["underline", format.underline],
+      ["strike", format.strike],
+      ["code", format.code],
+      ["color", format.color],
+      ["background", format.background],
+    ];
+    const updated = base.map(delta => {
+      const attributes: Record<string, unknown> = { ...(delta.attributes || {}) };
+      for (const [attrName, value] of specs) {
+        if (value === undefined) continue;
+        if (value === false || (typeof value === "string" && value.trim().length === 0)) {
+          delete attributes[attrName];
+        } else {
+          attributes[attrName] = value === true ? true : (value as string).trim();
+        }
+      }
+      return { insert: delta.insert, attributes };
+    });
+    block.set(cellKey, makeText(updated));
+  };
+
   const updateBlockHandler = async (params: {
     workspaceId?: string;
     docId: string;
@@ -9049,6 +9158,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     underline?: boolean;
     strike?: boolean;
     code?: boolean;
+    table?: TableUpdateInput;
   }) => {
     const workspaceId = params.workspaceId || defaults.workspaceId;
     if (!workspaceId) {
@@ -9182,6 +9292,111 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
           changed.push("text");
         } else {
           ignored.push("text");
+        }
+      }
+
+      // Structured table edits (affine:table only). Cell keys use 0-based
+      // 'rowIndex:columnIndex' (e.g. '0:1' = first row, second column).
+      if (params.table !== undefined) {
+        if (flavour === "affine:table") {
+          const { rows, columns } = readTableRowColumnIds(block);
+          const table = params.table;
+          let tableChanged = false;
+
+          const resolveRow = (key: string, indexText: string): string => {
+            const rowId = rows[Number(indexText)];
+            if (!rowId) {
+              throw new Error(`Table ${key} row index '${indexText}' out of bounds (table has ${rows.length} rows).`);
+            }
+            return rowId;
+          };
+          const resolveColumn = (key: string, indexText: string): string => {
+            const columnId = columns[Number(indexText)];
+            if (!columnId) {
+              throw new Error(`Table ${key} column index '${indexText}' out of bounds (table has ${columns.length} columns).`);
+            }
+            return columnId;
+          };
+
+          if (table.cells) {
+            for (const [key, value] of Object.entries(table.cells)) {
+              const match = TABLE_CELL_KEY_PATTERN.exec(key);
+              if (!match) {
+                throw new Error(`Invalid table cell key '${key}'. Use 'rowIndex:columnIndex' (0-based), e.g. '0:1'.`);
+              }
+              const rowId = resolveRow(key, match[1]);
+              const columnId = resolveColumn(key, match[2]);
+              if (typeof value === "string") {
+                block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value));
+              } else if (value && typeof value === "object") {
+                if (value.deltas) {
+                  block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value.deltas));
+                } else {
+                  block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value.text ?? ""));
+                }
+              }
+              tableChanged = true;
+            }
+          }
+
+          if (table.columnWidths) {
+            for (const [indexText, width] of Object.entries(table.columnWidths)) {
+              const columnId = resolveColumn("columnWidths", indexText);
+              // AFFiNE clamps column widths to [60, 240] px (see
+              // blocksuite/affine/blocks/table/src/consts.ts).
+              block.set(`prop:columns.${columnId}.width`, Math.min(240, Math.max(60, Math.floor(width))));
+              tableChanged = true;
+            }
+          }
+
+          if (table.rowHeights) {
+            // AFFiNE tables have no per-row height storage: row height is pure
+            // CSS layout (DefaultRowHeight = 39px in table/src/consts.ts).
+            // Report the unsupported field under `ignored` instead of writing a
+            // key AFFiNE never reads.
+            for (const indexText of Object.keys(table.rowHeights)) {
+              ignored.push(`table.rowHeights[${indexText}]`);
+            }
+          }
+
+          if (table.rowBackgrounds) {
+            for (const [indexText, color] of Object.entries(table.rowBackgrounds)) {
+              const rowId = resolveRow("rowBackgrounds", indexText);
+              // AFFiNE stores row background on the row itself
+              // (TableRow.backgroundColor, see affine/model/src/blocks/table/table-model.ts).
+              block.set(`prop:rows.${rowId}.backgroundColor`, color);
+              tableChanged = true;
+            }
+          }
+
+          if (table.columnBackgrounds) {
+            for (const [indexText, color] of Object.entries(table.columnBackgrounds)) {
+              const columnId = resolveColumn("columnBackgrounds", indexText);
+              // AFFiNE stores column background on the column itself
+              // (TableColumn.backgroundColor, see table-model.ts).
+              block.set(`prop:columns.${columnId}.backgroundColor`, color);
+              tableChanged = true;
+            }
+          }
+
+          if (table.cellFormats) {
+            for (const [key, format] of Object.entries(table.cellFormats)) {
+              const match = TABLE_CELL_KEY_PATTERN.exec(key);
+              if (!match) {
+                throw new Error(`Invalid table cell key '${key}'. Use 'rowIndex:columnIndex' (0-based), e.g. '0:1'.`);
+              }
+              const rowId = resolveRow(key, match[1]);
+              const columnId = resolveColumn(key, match[2]);
+              applyTableCellFormats(block, rowId, columnId, format);
+              tableChanged = true;
+            }
+          }
+
+          if (tableChanged) {
+            changed.push("table");
+          }
+        } else {
+          ignored.push("table");
         }
       }
 
@@ -9776,7 +9991,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     {
       title: "Update Block",
       description:
-        "Partially update document block properties by id. Supported fields depend on the block flavour: text/deltas for any text-bearing block (replace the whole text run, plain or rich), calloutColor/calloutIcon for affine:callout (background palette token and emoji icon), collapsed for affine:list (fold/unfold child blocks), textAlign for affine:paragraph/affine:list (left/center/right/justify), and rich-text format fields (textColor/textBackground/bold/italic/underline/strike/code) for any block with text. Fields that don't apply to the block's flavour come back under 'ignored'.",
+        "Partially update document block properties by id. Supported fields depend on the block flavour: text/deltas for any text-bearing block (replace the whole text run, plain or rich), calloutColor/calloutIcon for affine:callout (background palette token and emoji icon), collapsed for affine:list (fold/unfold child blocks), textAlign for affine:paragraph/affine:list (left/center/right/justify), rich-text format fields (textColor/textBackground/bold/italic/underline/strike/code) for any block with text, and a structured 'table' object for affine:table blocks (cell contents, column widths, row/column background colors, per-cell text formats; row heights are not supported by AFFiNE). Fields that don't apply to the block's flavour come back under 'ignored'.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
@@ -9797,6 +10012,25 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         underline: z.boolean().optional().describe("Any text-bearing block. true = apply underline, false = remove underline."),
         strike: z.boolean().optional().describe("Any text-bearing block. true = apply strikethrough, false = remove strikethrough."),
         code: z.boolean().optional().describe("Any text-bearing block. true = apply inline code, false = remove inline code."),
+        table: z.object({
+          cells: z.record(z.union([z.string(), z.object({
+            text: z.string().optional(),
+            deltas: z.array(z.object({ insert: z.string(), attributes: z.record(z.unknown()).optional() })).optional(),
+          })])).optional().describe("Update cell contents. Keys are 0-based 'rowIndex:columnIndex' (e.g. '0:1'). Value is a plain string or {text} / {deltas}."),
+          columnWidths: z.record(z.number()).optional().describe("Set column widths in px. Keys are 0-based column indexes. Values are clamped to AFFiNE's [60, 240] px range."),
+          rowHeights: z.record(z.number()).optional().describe("NOT SUPPORTED by AFFiNE: row height is pure CSS layout and is not stored. Providing this field reports the keys under `ignored` and writes nothing."),
+          rowBackgrounds: z.record(z.string()).optional().describe("Set background color for a whole row. Keys are 0-based row indexes; stored as TableRow.backgroundColor (a CSS color value)."),
+          columnBackgrounds: z.record(z.string()).optional().describe("Set background color for a whole column. Keys are 0-based column indexes; stored as TableColumn.backgroundColor (a CSS color value)."),
+          cellFormats: z.record(z.object({
+            bold: z.boolean().optional(),
+            italic: z.boolean().optional(),
+            underline: z.boolean().optional(),
+            strike: z.boolean().optional(),
+            code: z.boolean().optional(),
+            color: z.string().optional(),
+            background: z.string().optional(),
+          })).optional().describe("Apply rich-text formats to a cell's text. Keys are 0-based 'rowIndex:columnIndex'. Delta attributes (confirmed against AFFiNE inline-spec): bold/italic/underline/strike/code are boolean (true=set, false=remove); color (text color) and background (text highlight) are strings (''=remove). This is per-text formatting — NOT the same as row/column background colors."),
+        }).optional().describe("Table only. Structured edits for affine:table blocks: cell contents, column widths, row/column background colors (TableRow/TableColumn.backgroundColor), and per-cell text formats. Row heights are not supported by AFFiNE (pure CSS layout) and are reported under `ignored`."),
       },
     },
     updateBlockHandler as any
