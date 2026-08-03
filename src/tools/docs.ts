@@ -9036,6 +9036,8 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     workspaceId?: string;
     docId: string;
     blockId: string;
+    text?: string;
+    deltas?: TextDelta[];
     calloutColor?: string;
     calloutIcon?: string;
     collapsed?: boolean;
@@ -9164,6 +9166,22 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
               ignored.push(paramName);
             }
           }
+        }
+      }
+
+      // Wholesale text replacement. `deltas` (rich text) takes precedence over
+      // `text` (plain) when both are provided — mirrors createBlock's
+      // `normalized.deltas ?? content` semantics.
+      if (params.text !== undefined || params.deltas !== undefined) {
+        if (block.get("prop:text") instanceof Y.Text) {
+          if (params.deltas !== undefined) {
+            block.set("prop:text", makeText(params.deltas));
+          } else {
+            block.set("prop:text", makeText(params.text ?? ""));
+          }
+          changed.push("text");
+        } else {
+          ignored.push("text");
         }
       }
 
@@ -9758,11 +9776,16 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     {
       title: "Update Block",
       description:
-        "Partially update document block properties by id. Supported fields depend on the block flavour: calloutColor/calloutIcon for affine:callout (background palette token and emoji icon), collapsed for affine:list (fold/unfold child blocks), textAlign for affine:paragraph/affine:list (left/center/right/justify), and rich-text format fields (textColor/textBackground/bold/italic/underline/strike/code) for any block with text. Fields that don't apply to the block's flavour come back under 'ignored'.",
+        "Partially update document block properties by id. Supported fields depend on the block flavour: text/deltas for any text-bearing block (replace the whole text run, plain or rich), calloutColor/calloutIcon for affine:callout (background palette token and emoji icon), collapsed for affine:list (fold/unfold child blocks), textAlign for affine:paragraph/affine:list (left/center/right/justify), and rich-text format fields (textColor/textBackground/bold/italic/underline/strike/code) for any block with text. Fields that don't apply to the block's flavour come back under 'ignored'.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
         blockId: z.string().min(1).describe("Block id to update."),
+        text: z.string().optional().describe("Any text-bearing block. Replaces the block's entire text content with plain text (drops existing inline formatting). Pass '' to clear the text."),
+        deltas: z.array(z.object({
+          insert: z.string(),
+          attributes: z.record(z.unknown()).optional(),
+        })).optional().describe("Any text-bearing block. Replaces the block's entire text content with rich-text deltas (insert + attributes like {bold:true, color:'red'}). Takes precedence over 'text'."),
         calloutColor: z.string().optional().describe("Callout only. Background palette token: transparent / red / orange / yellow / green / teal / blue / purple / magenta / grey / black / white. Maps to AFFiNE prop:backgroundColorName."),
         calloutIcon: z.string().optional().describe("Callout only. Emoji for the callout icon (e.g. '📘', '⚠️')."),
         collapsed: z.boolean().optional().describe("List only. true = fold child blocks (prop:collapsed=true), false = expand (remove prop:collapsed)."),
