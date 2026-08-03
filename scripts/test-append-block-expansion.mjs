@@ -73,6 +73,16 @@ const STEP2_CASES = [
     expect: { flavour: 'affine:callout' },
   },
   {
+    name: 'callout custom color',
+    args: { type: 'callout', text: 'step2 callout blue', calloutColor: 'blue', calloutIcon: '📘' },
+    expect: { flavour: 'affine:callout' },
+  },
+  {
+    name: 'list collapsed',
+    args: { type: 'list', style: 'bulleted', text: 'step2 collapsed list', collapsed: true },
+    expect: { flavour: 'affine:list', type: 'bulleted', collapsed: true },
+  },
+  {
     name: 'latex',
     args: { type: 'latex', latex: '\\\\frac{a}{b}' },
     expect: { flavour: 'affine:latex' },
@@ -326,6 +336,9 @@ async function main() {
       }
       if (item.expect.checked !== undefined && row.checked !== item.expect.checked) {
         throw new Error(`Case '${item.caseName}' expected checked='${item.expect.checked}' but got '${row.checked}'`);
+      }
+      if (item.expect.collapsed !== undefined && row.collapsed !== item.expect.collapsed) {
+        throw new Error(`Case '${item.caseName}' expected collapsed='${item.expect.collapsed}' but got '${row.collapsed}'`);
       }
       if (item.expect.language && row.language !== item.expect.language) {
         throw new Error(`Case '${item.caseName}' expected language='${item.expect.language}' but got '${row.language}'`);

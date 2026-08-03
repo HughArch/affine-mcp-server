@@ -411,6 +411,9 @@ type AppendBlockInput = {
     gap?: number;
   };
   padding?: number;
+  calloutColor?: string;
+  calloutIcon?: string;
+  collapsed?: boolean;
 };
 
 type NormalizedAppendBlockInput = {
@@ -464,6 +467,9 @@ type NormalizedAppendBlockInput = {
   heightProvided?: boolean;
   widthProvided?: boolean;
   markdown?: string;
+  calloutColor: string;
+  calloutIcon: string;
+  collapsed: boolean;
   // Resolved by resolveEdgelessLayoutHints from `childElementIds`; carries
   // both the ids to write and the ones that didn't resolve for the receipt.
   _frameOwnedIds?: string[];
@@ -1553,6 +1559,34 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       throw new Error("The 'background' field is only valid for frame/note.");
     }
 
+    const CALLOUT_COLOR_TOKENS = [
+      "transparent",
+      "red",
+      "orange",
+      "yellow",
+      "green",
+      "teal",
+      "blue",
+      "purple",
+      "magenta",
+      "grey",
+      "black",
+      "white",
+    ] as const;
+    if (normalized.type === "callout") {
+      if (!(CALLOUT_COLOR_TOKENS as readonly string[]).includes(normalized.calloutColor)) {
+        throw new Error(`Invalid calloutColor '${normalized.calloutColor}'. Valid values: ${CALLOUT_COLOR_TOKENS.join(" / ")}.`);
+      }
+    } else if (raw.calloutColor !== undefined && normalized.strict) {
+      throw new Error("The 'calloutColor' field is only valid for type='callout'.");
+    }
+    if (normalized.type !== "callout" && raw.calloutIcon !== undefined && normalized.strict) {
+      throw new Error("The 'calloutIcon' field is only valid for type='callout'.");
+    }
+    if (normalized.type !== "list" && raw.collapsed !== undefined && normalized.strict) {
+      throw new Error("The 'collapsed' field is only valid for type='list'.");
+    }
+
     if (normalized.type === "table") {
       if (!Number.isInteger(normalized.rows) || normalized.rows < 1 || normalized.rows > 20) {
         throw new Error("table rows must be an integer between 1 and 20.");
@@ -1626,6 +1660,9 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     const latex = (parsed.latex ?? "").trim();
     const tableData = Array.isArray(parsed.tableData) ? parsed.tableData : undefined;
     const tableCellDeltas = Array.isArray(parsed.tableCellDeltas) ? parsed.tableCellDeltas : undefined;
+    const calloutColor = (typeof parsed.calloutColor === "string" ? parsed.calloutColor.trim() : "") || "grey";
+    const calloutIcon = (typeof parsed.calloutIcon === "string" ? parsed.calloutIcon.trim() : "") || "💡";
+    const collapsed = parsed.collapsed === true;
 
     const normalized: NormalizedAppendBlockInput = {
       workspaceId: parsed.workspaceId,
@@ -1673,6 +1710,9 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       widthProvided,
       heightProvided,
       markdown: typeof parsed.markdown === "string" ? parsed.markdown : undefined,
+      calloutColor,
+      calloutIcon,
+      collapsed,
     };
 
     validateNormalizedAppendBlockInput(normalized, parsed);
@@ -2057,6 +2097,11 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         block.set("prop:type", normalized.listStyle);
         block.set("prop:checked", normalized.listStyle === "todo" ? normalized.checked : false);
         block.set("prop:text", makeText(normalized.deltas ?? content));
+        // prop:collapsed is BlockSuite's folding state: true collapses any
+        // child blocks (the toggle arrow appears when children exist).
+        if (normalized.collapsed) {
+          block.set("prop:collapsed", true);
+        }
         return { blockId, block, flavour: "affine:list", blockType: normalized.listStyle };
       }
       case "code": {
@@ -2089,8 +2134,8 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         textBlock.set("prop:text", makeText(normalized.deltas ?? content));
         calloutChildren.push([textBlockId]);
         block.set("sys:children", calloutChildren);
-        block.set("prop:icon", { type: "emoji", unicode: "💡" });
-        block.set("prop:backgroundColorName", "grey");
+        block.set("prop:icon", { type: "emoji", unicode: normalized.calloutIcon });
+        block.set("prop:backgroundColorName", normalized.calloutColor);
         return {
           blockId,
           block,
@@ -5158,6 +5203,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         text: string | null;
         linkedDocIds: string[];
         checked: boolean | null;
+        collapsed: boolean | null;
         language: string | null;
         childIds: string[];
       }> = [];
@@ -5179,6 +5225,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         const linkedDocIds = extractLinkedPageRefs(propText);
         const language = raw.get("prop:language");
         const checked = raw.get("prop:checked");
+        const collapsed = raw.get("prop:collapsed");
         const childIds = childIdsFrom(raw.get("sys:children"));
 
         if (flavour === "affine:page") {
@@ -5196,6 +5243,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
           text: textValue.length > 0 ? textValue : null,
           linkedDocIds,
           checked: typeof checked === "boolean" ? checked : null,
+          collapsed: typeof collapsed === "boolean" ? collapsed : null,
           language: typeof language === "string" ? language : null,
           childIds,
         });
@@ -5906,8 +5954,11 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         bookmarkStyle: AppendBlockBookmarkStyle.optional().describe("Bookmark card style"),
         viewMode: AppendBlockDataViewMode.optional().describe("Initial data view preset for type=database or type=data_view. Defaults: database=table, data_view=kanban"),
         checked: z.boolean().optional().describe("Todo state when type is todo"),
+        collapsed: z.boolean().optional().describe("When type=list, fold the block's child items by default (BlockSuite prop:collapsed). Only has a visible effect when the block has children — add child blocks (e.g. via append_block into this block) to see the toggle arrow in a collapsed state. Default false (expanded)."),
         language: z.string().optional().describe("Code language when type is code"),
         caption: z.string().optional().describe("Code caption when type is code"),
+        calloutColor: z.string().optional().describe("Background palette token for type=callout. Valid: transparent / red / orange / yellow / green / teal / blue / purple / magenta / grey / black / white. Default 'grey'. Maps to AFFiNE prop:backgroundColorName."),
+        calloutIcon: z.string().optional().describe("Emoji for type=callout icon (default '💡'). Any single emoji character."),
         strict: z.boolean().optional().describe("Strict validation mode (default true)"),
         placement: z
           .object({
