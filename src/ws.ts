@@ -127,6 +127,29 @@ export async function joinWorkspace(socket: WorkspaceSocket, workspaceId: string
 
 type LoadDocResult = { missing?: string; state?: string; timestamp?: number };
 
+/**
+ * Enumerate every document in a workspace (including internal sub-docs such as
+ * `db$<workspaceId>$folders` / `db$<workspaceId>$explorerIcon`) via the
+ * `space:load-doc-timestamps` event. Returns a map of docId -> last-update
+ * timestamp (ms).
+ */
+export async function loadDocTimestamps(
+  socket: WorkspaceSocket,
+  workspaceId: string,
+): Promise<Record<string, number>> {
+  return emitWithAck<Record<string, number>>(
+    socket,
+    'space:load-doc-timestamps',
+    { spaceType: 'workspace', spaceId: workspaceId },
+    (ack) => {
+      if (ack?.error) {
+        throw new Error(ackErrorMessage(ack, 'load-doc-timestamps failed') || 'load-doc-timestamps failed');
+      }
+      return (ack?.data as Record<string, number>) ?? {};
+    },
+  );
+}
+
 export async function loadDoc(socket: WorkspaceSocket, workspaceId: string, docId: string): Promise<LoadDocResult> {
   return emitWithAck<LoadDocResult>(
     socket,

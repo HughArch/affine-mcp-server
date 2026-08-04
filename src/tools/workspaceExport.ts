@@ -10,6 +10,7 @@ import {
   connectWorkspaceSocket,
   joinWorkspace,
   loadDoc,
+  loadDocTimestamps,
   wsUrlFromGraphQLEndpoint,
 } from "../ws.js";
 
@@ -26,13 +27,34 @@ import {
  * structure, not content).
  *
  * This export re-creates an equivalent database server-side:
- *   1. enumerate doc ids via GraphQL (plus the workspace root doc),
+ *   1. enumerate doc ids via WS `space:load-doc-timestamps` (which includes
+ *      workspace sub-docs like db$<wsId>$folders / $docProperties / $explorerIcon
+ *      that GraphQL's workspace.docs omits), plus known sub-doc patterns that
+ *      the timestamps endpoint may not have synced yet,
  *   2. download each doc's merged Yjs state from
  *      GET /api/workspaces/:id/docs/:guid,
  *   3. scan each doc's blocks for blob references (prop:sourceId),
  *   4. download each referenced blob from GET /api/workspaces/:id/blobs/:name,
  *   5. write everything into a nbstore-v1-shaped SQLite file via node:sqlite.
  */
+
+// Workspace sub-docs hold sidebar/page icons, doc properties, folders, and
+// collections (see AFFiNE packages/frontend/core/src/modules/db/schema). They
+// are NOT listed by GraphQL workspace.docs. Both legacy (db$<table>) and current
+// (db$<workspaceId>$<table>) guid forms are attempted; missing ones are skipped.
+const WORKSPACE_SUBDOC_TABLES = [
+  "explorerIcon",
+  "docProperties",
+  "docCustomPropertyInfo",
+  "folders",
+  "pinnedCollections",
+] as const;
+
+function workspaceSubDocCandidates(workspaceId: string): string[] {
+  const legacy = WORKSPACE_SUBDOC_TABLES.map((table) => `db$${table}`);
+  const current = WORKSPACE_SUBDOC_TABLES.map((table) => `db$${workspaceId}$${table}`);
+  return [...legacy, ...current];
+}
 
 // nbstore v1 schema — column names must match AFFiNE's V1_IMPORT_SCHEMA_RULES
 // exactly or `loadDBFile` will reject the file with DB_FILE_INVALID.
@@ -164,6 +186,27 @@ async function readWorkspacePageIdsFromRootDoc(
   }
 }
 
+/**
+ * Primary doc enumeration: WS `space:load-doc-timestamps` returns every doc in
+ * the workspace (pages, the root doc, and db$ sub-docs), filtered by the
+ * caller's read permission. Falls back to reading the root doc's meta.pages if
+ * the timestamps call fails.
+ */
+async function readAllDocIdsFromTimestamps(
+  gql: GraphQLClient,
+  workspaceId: string
+): Promise<Set<string>> {
+  const { endpoint, cookie, bearer } = await gql.getConnectionAuth();
+  const socket = await connectWorkspaceSocket(wsUrlFromGraphQLEndpoint(endpoint), cookie, bearer);
+  try {
+    await joinWorkspace(socket, workspaceId);
+    const timestamps = await loadDocTimestamps(socket, workspaceId);
+    return new Set(Object.keys(timestamps));
+  } finally {
+    socket.disconnect();
+  }
+}
+
 async function downloadBinary(url: string, headers: Record<string, string>): Promise<Uint8Array> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
@@ -208,37 +251,55 @@ export function registerWorkspaceExportTools(
     const baseUrl = new URL(endpoint).origin;
     const wsPart = encodeURIComponent(workspaceId);
 
-    // 1. Enumerate documents (GraphQL doc list + the workspace root doc).
+    // 1. Enumerate documents. Primary source: WS `space:load-doc-timestamps`,
+    // which includes workspace sub-docs (db$...) that GraphQL workspace.docs
+    // omits. We also probe known sub-doc guids (explorerIcon, docProperties,
+    // folders, ...) in both legacy and current naming forms so icons and other
+    // workspace metadata are never dropped from the backup.
     const docIds = new Set<string>();
     try {
-      const data = await gql.request<DocListResponse>(DOC_LIST_QUERY, { workspaceId });
-      for (const edge of data.workspace?.docs?.edges ?? []) {
-        const docId = edge?.node?.id;
-        if (typeof docId === "string" && docId.length > 0) {
-          docIds.add(docId);
-        }
+      const timestampIds = await readAllDocIdsFromTimestamps(gql, workspaceId);
+      for (const docId of timestampIds) {
+        docIds.add(docId);
       }
     } catch (err) {
-      // Workspace.docs requires Workspace.Users.Manage. If the caller lacks it,
-      // fall back to the workspace root doc's meta.pages (WS snapshot), which
-      // only needs workspace join access.
+      // Fallback 1: GraphQL workspace.docs (needs Workspace.Users.Manage).
       try {
-        const wsDocIds = await readWorkspacePageIdsFromRootDoc(gql, workspaceId);
-        for (const docId of wsDocIds) {
-          docIds.add(docId);
+        const data = await gql.request<DocListResponse>(DOC_LIST_QUERY, { workspaceId });
+        for (const edge of data.workspace?.docs?.edges ?? []) {
+          const docId = edge?.node?.id;
+          if (typeof docId === "string" && docId.length > 0) {
+            docIds.add(docId);
+          }
         }
-      } catch (fallbackErr) {
-        throw new Error(
-          `Failed to list workspace documents: ${(err as Error).message} ` +
-            `(meta.pages fallback also failed: ${(fallbackErr as Error).message})`
-        );
+      } catch (gqlErr) {
+        // Fallback 2: workspace root doc meta.pages.
+        try {
+          const wsDocIds = await readWorkspacePageIdsFromRootDoc(gql, workspaceId);
+          for (const docId of wsDocIds) {
+            docIds.add(docId);
+          }
+        } catch (fallbackErr) {
+          throw new Error(
+            `Failed to enumerate workspace documents: ${(err as Error).message} ` +
+              `(GraphQL fallback: ${(gqlErr as Error).message}; meta.pages fallback: ${(fallbackErr as Error).message})`
+          );
+        }
       }
     }
     docIds.add(workspaceId); // workspace root doc (meta: pages, tags, ...)
+    for (const candidate of workspaceSubDocCandidates(workspaceId)) {
+      docIds.add(candidate); // probed below; missing ones are skipped at download
+    }
 
-    // 2. Download each document's merged Yjs state.
+    // 2. Download each document's merged Yjs state. Probed sub-doc guids that
+    // do not exist on the server (e.g. a workspace that never created an
+    // explorerIcon sub-doc) are skipped silently instead of being reported as
+    // download failures.
+    const probedCandidates = new Set(workspaceSubDocCandidates(workspaceId));
     const docBins = new Map<string, Uint8Array>();
     const docFailures: Array<{ docId: string; error: string }> = [];
+    const skippedMissingSubDocs: string[] = [];
     await mapLimit([...docIds], DOWNLOAD_CONCURRENCY, async (docId) => {
       try {
         const bin = await downloadBinary(
@@ -247,7 +308,12 @@ export function registerWorkspaceExportTools(
         );
         docBins.set(docId, bin);
       } catch (err) {
-        docFailures.push({ docId, error: (err as Error).message });
+        if (probedCandidates.has(docId)) {
+          // Probe only: this sub-doc was never created in this workspace.
+          skippedMissingSubDocs.push(docId);
+        } else {
+          docFailures.push({ docId, error: (err as Error).message });
+        }
       }
     });
 
@@ -349,6 +415,7 @@ export function registerWorkspaceExportTools(
       blobSkipped: !includeBlobs && blobKeys.size > 0 ? blobKeys.size : 0,
       docDownloadFailures: docFailures,
       blobDownloadFailures: blobFailures,
+      skippedMissingSubDocs,
       docBytes: totalDocBytes,
       blobBytes: totalBlobBytes,
       totalBytes: totalDocBytes + totalBlobBytes,
