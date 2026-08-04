@@ -16,6 +16,7 @@ import { registerAuthTools } from "./tools/auth.js";
 import { registerOrganizeTools } from "./tools/organize.js";
 import { registerPropertyTools } from "./tools/properties.js";
 import { registerIconTools } from "./tools/icons.js";
+import { registerWorkspaceExportTools } from "./tools/workspaceExport.js";
 import { runCli } from "./cli.js";
 import { startHttpMcpServer } from "./sse.js";
 import { existsSync } from "fs";
@@ -210,6 +211,7 @@ async function buildServer() {
   }
   registerBlobTools(server, gql);
   registerNotificationTools(server, gql);
+  registerWorkspaceExportTools(server, gql, { workspaceId: config.defaultWorkspaceId });
   return server;
 }
 

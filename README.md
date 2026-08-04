@@ -38,7 +38,7 @@ Highlights:
 - Supports AFFiNE Cloud and self-hosted AFFiNE instances
 - Supports stdio and HTTP transports
 - Supports session-cookie and email/password authentication, plus compatible bearer tokens for older deployments
-- Exposes 93 canonical MCP tools backed by AFFiNE GraphQL and WebSocket APIs
+- Exposes 94 canonical MCP tools backed by AFFiNE GraphQL and WebSocket APIs
 - Includes semantic page composition, native template instantiation, database intent composition, capability and fidelity reporting, and workspace blueprint helpers
 - Includes Docker images, health probes, and end-to-end test coverage
 
@@ -154,7 +154,7 @@ If you want to expose the server remotely over HTTP instead of stdio, start with
 
 ## Compatibility Matrix
 
-Node.js 20 is the minimum supported runtime. CI validates the minimum runtime and the current Node.js release used by the npm publish workflow.
+Node.js 22.13+ is the minimum supported runtime (required for `node:sqlite`, used by `export_workspace`). CI validates the minimum runtime and the current Node.js release used by the npm publish workflow.
 
 | Target | Transport | Recommended auth | Recommended path |
 | --- | --- | --- | --- |

@@ -117,8 +117,8 @@ async function run() {
       "update_database_cell",
     ];
     const stillRegistered = removedTools.filter(t => allTools.includes(t));
-    if (allTools.length === 93 && stillRegistered.length === 0) {
-      console.log("✅ Success: Default tool surface exposes 93 tools.");
+    if (allTools.length === 94 && stillRegistered.length === 0) {
+      console.log("✅ Success: Default tool surface exposes 94 tools.");
     } else {
       console.error(`❌ Failed: Default tool surface mismatch. count=${allTools.length} stillRegistered=${stillRegistered.join(", ")}`);
       hasFailures = true;

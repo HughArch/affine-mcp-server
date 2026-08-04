@@ -123,6 +123,7 @@ Use this document as a grouped catalog. For exact schemas, your MCP client shoul
 | --- | --- | --- |
 | `export_doc_markdown` | Export document content as Markdown | Preserves supported inline rich text and safely escapes untrusted Markdown contexts, URLs, tables, code fences, and optional frontmatter |
 | `export_with_fidelity_report` | Export a document with a machine-readable fidelity report | Reports unsupported inline attributes and native block loss while using the same safe serializer |
+| `export_workspace` | Export an entire workspace as a `.affine` backup file | Downloads every document's Yjs state plus attachments via the workspace REST API and writes a nbstore-v1 SQLite file (`updates` + `blobs` tables) that AFFiNE desktop can import as a new local workspace. `outputPath` sets the target file (default: system temp dir); `includeBlobs: false` skips attachments. Requires Node >= 22.13 (`node:sqlite`). |
 
 ## Database blocks
 
