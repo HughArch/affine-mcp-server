@@ -211,7 +211,7 @@ async function buildServer() {
   }
   registerBlobTools(server, gql);
   registerNotificationTools(server, gql);
-  registerWorkspaceExportTools(server, gql, { workspaceId: config.defaultWorkspaceId });
+  registerWorkspaceExportTools(server, gql, { workspaceId: config.defaultWorkspaceId, exportDir: config.exportDir });
   return server;
 }
 

@@ -189,7 +189,7 @@ async function downloadBinary(url: string, headers: Record<string, string>): Pro
 export function registerWorkspaceExportTools(
   server: McpServer,
   gql: GraphQLClient,
-  defaults: { workspaceId?: string }
+  defaults: { workspaceId?: string; exportDir?: string }
 ): void {
   const exportWorkspaceHandler = async (params: {
     workspaceId?: string;
@@ -288,9 +288,12 @@ export function registerWorkspaceExportTools(
     }
 
     // 5. Write the nbstore-v1 SQLite database.
+    // Priority: explicit outputPath > AFFINE_EXPORT_DIR > system temp dir.
     const outputPath =
       params.outputPath?.trim() ||
-      path.join(os.tmpdir(), `affine-mcp-export-${workspaceId}-${Date.now()}.affine`);
+      (defaults.exportDir
+        ? path.join(defaults.exportDir, `affine-mcp-export-${workspaceId}-${Date.now()}.affine`)
+        : path.join(os.tmpdir(), `affine-mcp-export-${workspaceId}-${Date.now()}.affine`));
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
     let DatabaseSync: new (location: string) => {

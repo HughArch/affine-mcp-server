@@ -32,13 +32,19 @@ COPY --chown=affine:affine bin/ ./bin/
 COPY --chown=affine:affine package.json ./
 COPY --chown=affine:affine tool-manifest.json ./
 
+# Fixed in-container export location for export_workspace. Mount a host
+# directory here in docker-compose (e.g. -v /host/backups:/affine-backup) to
+# persist exported .affine files outside the container.
+RUN mkdir -p /affine-backup && chown affine:affine /affine-backup
+
 USER affine
 
 EXPOSE 3002
 
 ENV MCP_TRANSPORT=http \
     AFFINE_MCP_HTTP_HOST=0.0.0.0 \
-    PORT=3002
+    PORT=3002 \
+    AFFINE_EXPORT_DIR=/affine-backup
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:${PORT}/healthz || exit 1

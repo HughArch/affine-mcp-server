@@ -44,6 +44,7 @@ export type ServerConfig = {
   email?: string;
   password?: string;
   defaultWorkspaceId?: string;
+  exportDir?: string;
   authMode: "bearer" | "oauth";
   publicBaseUrl?: string;
   oauthIssuerUrl?: string;
@@ -395,6 +396,8 @@ export function loadConfig(): ServerConfig {
   const graphqlPath = validateGraphqlPath(env("AFFINE_GRAPHQL_PATH", file, "/graphql")!);
   const graphqlEndpoint = `${baseUrl}${graphqlPath}`;
   const defaultWorkspaceId = env("AFFINE_WORKSPACE_ID", file);
+  const exportDirRaw = env("AFFINE_EXPORT_DIR", file);
+  const exportDir = exportDirRaw && exportDirRaw.trim() ? exportDirRaw.trim().replace(/[\\/]+$/, "") : undefined;
   const publicBaseUrlRaw = env("AFFINE_MCP_PUBLIC_BASE_URL", file);
   const oauthIssuerUrlRaw = env("AFFINE_OAUTH_ISSUER_URL", file);
   const publicBaseUrl = publicBaseUrlRaw
@@ -438,6 +441,7 @@ export function loadConfig(): ServerConfig {
     email,
     password,
     defaultWorkspaceId,
+    exportDir,
     authMode,
     publicBaseUrl,
     oauthIssuerUrl,

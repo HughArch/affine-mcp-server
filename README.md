@@ -82,6 +82,7 @@ npx -y -p affine-mcp-server affine-mcp -- --version
 ```bash
 docker run -d \
   -p 3000:3000 \
+  -v /host/backups:/affine-backup \
   -e MCP_TRANSPORT=http \
   -e AFFINE_BASE_URL=https://your-affine-instance.com \
   -e AFFINE_EMAIL=you@example.com \
@@ -90,6 +91,8 @@ docker run -d \
   -e AFFINE_MCP_HTTP_TOKEN=your-strong-secret \
   ghcr.io/dawncr0w/affine-mcp-server:latest
 ```
+
+`export_workspace` writes `.affine` backups to the container's fixed export directory `/affine-backup`; mount a host directory there (`-v /host/backups:/affine-backup` above) so exported files land on your host. Inside the container the tool reports `filePath` under that directory — to retrieve a backup, look in your mounted host directory for the returned filename. The `outputPath` argument to `export_workspace` overrides this and may point anywhere the container can write (mount additional volumes as needed).
 
 Then point your client at:
 

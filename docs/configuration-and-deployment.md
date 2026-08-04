@@ -51,6 +51,7 @@ cookie, while setting a bearer credential removes any cookie header.
 | `AFFINE_ALLOW_INSECURE_HTTP` | No | `false` | Explicitly allow a remote plain-HTTP AFFiNE URL on a trusted private network only |
 | `AFFINE_GRAPHQL_PATH` | No | `/graphql` | Override only if your AFFiNE deployment uses a custom GraphQL path |
 | `AFFINE_HEADERS_JSON` | No | none | JSON object of additional string headers sent to AFFiNE; built-in token/cookie auth takes priority |
+| `AFFINE_EXPORT_DIR` | No | system temp dir | Directory where `export_workspace` writes `.affine` backup files when no `outputPath` argument is given. In the Docker image this defaults to `/affine-backup`; mount a host volume there (e.g. `-v /host/backups:/affine-backup`) to persist exports outside the container. |
 | `AFFINE_WORKSPACE_ID` | No | Auto-detected when possible | Pins the active workspace |
 | `AFFINE_LOGIN_AT_START` | No | `async` | `async` starts one shared login without blocking transport startup; `sync` requires login before startup |
 | `AFFINE_CLIENT_VERSION` | No | `0.26.0` | AFFiNE web-client version sent as the `x-affine-version` header on GraphQL/REST requests. Servers that gate on client version reject sign-in with `403 UNSUPPORTED_CLIENT_VERSION` when it is too low; raise this if your deployment pins a higher minimum. Also used as the fallback default for `AFFINE_WS_CLIENT_VERSION` |
