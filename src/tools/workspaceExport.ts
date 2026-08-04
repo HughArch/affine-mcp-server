@@ -17,14 +17,12 @@ import {
 /**
  * AFFiNE workspace export as a `.affine` backup file.
  *
- * The `.affine` format (nbstore v1, see AFFiNE
- * packages/frontend/native/schema/src/v1.rs) is a SQLite database with five
- * tables: `updates` (Yjs doc state per doc_id), `blobs` (attachment binaries
- * keyed by blob key), `version_info`, `server_clock`, and `sync_metadata`.
- * AFFiNE's desktop app produces it via `pool.vacuumInto()` (a SQLite
- * VACUUM INTO of the local workspace database) and restores it with
- * `loadDBFile()` + `validateImportSchema()` (which only checks the table
- * structure, not content).
+ * The `.affine` format is a SQLite database. This export writes the nbstore v2
+ * layout (meta / snapshots / updates / clocks / blobs / peer_clocks — see AFFiNE
+ * packages/frontend/native/schema/src/import_validation.rs, V2_IMPORT_SCHEMA_RULES)
+ * so AFFiNE desktop's `loadDBFile` takes the v2 import path (`setSpaceId` etc.).
+ * v1 imports route through `cpV1DBFile`, which never surfaces workspace sub-docs
+ * (icons/folders) to the WorkspaceDB — that is why the export must be v2.
  *
  * This export re-creates an equivalent database server-side:
  *   1. enumerate doc ids via WS `space:load-doc-timestamps` (which includes
@@ -35,7 +33,7 @@ import {
  *      GET /api/workspaces/:id/docs/:guid,
  *   3. scan each doc's blocks for blob references (prop:sourceId),
  *   4. download each referenced blob from GET /api/workspaces/:id/blobs/:name,
- *   5. write everything into a nbstore-v1-shaped SQLite file via node:sqlite.
+ *   5. write everything into a nbstore-v2-shaped SQLite file via node:sqlite.
  */
 
 // Workspace sub-docs hold sidebar/page icons, doc properties, folders, and
@@ -56,34 +54,128 @@ function workspaceSubDocCandidates(workspaceId: string): string[] {
   return [...legacy, ...current];
 }
 
-// nbstore v1 schema — column names must match AFFiNE's V1_IMPORT_SCHEMA_RULES
-// exactly or `loadDBFile` will reject the file with DB_FILE_INVALID.
-const NBSTORE_V1_SCHEMA = `
-CREATE TABLE IF NOT EXISTS "updates" (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+/**
+ * AFFiNE's desktop WorkspaceDB addresses tables as `db$<table>` (see
+ * packages/frontend/core/src/modules/db/services/db.ts, storageDocId:
+ * `db$${tableName}`), but the server persists them as `db$<workspaceId>$<table>`.
+ * On import the desktop app generates a NEW workspace id, so a sub-doc stored
+ * under the old `db$<workspaceId>$<table>` guid would never be found again. Map
+ * the server-side guid to the desktop-visible `db$<table>` form so icons,
+ * folders and doc properties survive the import. Unknown/plain doc ids pass
+ * through unchanged.
+ */
+function toDesktopSubDocId(docId: string, workspaceId: string): string {
+  const prefix = `db$${workspaceId}$`;
+  if (docId.startsWith(prefix)) {
+    return `db$${docId.slice(prefix.length)}`;
+  }
+  return docId;
+}
+
+// sqlx migration bookkeeping for nbstore v2 (see AFFiNE
+// packages/frontend/native/schema/src/lib.rs, MIGRATIONS). The desktop app's
+// DocStorage.set_space_id() -> connect() -> migrate() replays these migrations
+// against the imported file. Without a fully-applied _sqlx_migrations table the
+// migrator re-runs migration 1 (init_v2), whose `CREATE TABLE "meta"` (no
+// IF NOT EXISTS) fails because the tables already exist — the import then
+// errors out with UNKNOWN_ERROR. A real desktop export carries these rows, so
+// we must too; the checksums are SHA-384 of the exact migration SQL and match
+// what a desktop-generated workspace db stores.
+const SQLX_MIGRATIONS: ReadonlyArray<{ version: number; description: string; checksumHex: string }> = [
+  {
+    version: 1,
+    description: "init_v2",
+    checksumHex:
+      "a1f0a1496ba1d1ff1689fc234514b13e7501ce5a3891b5943a75300b20e68444444ae71a1a80f40e46ccee2fc9e2af1a",
+  },
+  {
+    version: 2,
+    description: "add_blob_sync",
+    checksumHex:
+      "c40244fec04822d74db419bead8486db435bb52d1f0214e4ddcc8928f4444475c7be8f96cee4c4383fd21b866fffd630",
+  },
+  {
+    version: 3,
+    description: "add_idx_snapshots",
+    checksumHex:
+      "c13e51745e6f2d3e49f01fc82df68e88e91feabfa0a28507d658bb85b4c5cb81354ac8b23eb1038b175b1ae66311980a",
+  },
+  {
+    version: 4,
+    description: "add_indexer_sync",
+    checksumHex:
+      "eeb9b2d07c3827f326feaed6651f587f177c2312c701d72f321c2d1a132bcd962fc914b39b12a34694003033bf29882b",
+  },
+];
+
+// nbstore v2 schema — matches AFFiNE's V2_IMPORT_SCHEMA_RULES (see
+// packages/frontend/native/schema/src/import_validation.rs). The desktop app's
+// `loadDBFile` validates against THIS schema first (meta/snapshots/updates/
+// clocks/blobs/peer_clocks required). Exporting v2 makes the import take the
+// v2 path (setSpaceId etc.), where workspace sub-docs such as db$explorerIcon
+// are loaded by the WorkspaceDB — v1 imports never surface those sub-docs.
+const NBSTORE_V2_SCHEMA = `
+CREATE TABLE IF NOT EXISTS "_sqlx_migrations" (
+  version BIGINT PRIMARY KEY,
+  description TEXT NOT NULL,
+  installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  success BOOLEAN NOT NULL,
+  checksum BLOB NOT NULL,
+  execution_time BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "meta" (
+  space_id VARCHAR NOT NULL PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS "snapshots" (
+  doc_id VARCHAR NOT NULL PRIMARY KEY,
   data BLOB NOT NULL,
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-  doc_id TEXT
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS "updates" (
+  doc_id VARCHAR NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  data BLOB NOT NULL,
+  PRIMARY KEY (doc_id, created_at)
+);
+CREATE TABLE IF NOT EXISTS "clocks" (
+  doc_id VARCHAR NOT NULL PRIMARY KEY,
+  timestamp TIMESTAMP NOT NULL
 );
 CREATE TABLE IF NOT EXISTS "blobs" (
-  key TEXT PRIMARY KEY NOT NULL,
+  key VARCHAR NOT NULL PRIMARY KEY,
   data BLOB NOT NULL,
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+  mime VARCHAR NOT NULL,
+  size INTEGER NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted_at TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS "version_info" (
-  version NUMBER NOT NULL,
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+CREATE TABLE IF NOT EXISTS "peer_clocks" (
+  peer VARCHAR NOT NULL,
+  doc_id VARCHAR NOT NULL,
+  remote_clock TIMESTAMP NOT NULL DEFAULT 0,
+  pulled_remote_clock TIMESTAMP NOT NULL DEFAULT 0,
+  pushed_clock TIMESTAMP NOT NULL DEFAULT 0,
+  PRIMARY KEY (peer, doc_id)
 );
-CREATE TABLE IF NOT EXISTS "server_clock" (
-  key TEXT PRIMARY KEY NOT NULL,
+CREATE TABLE IF NOT EXISTS "peer_blob_sync" (
+  peer VARCHAR NOT NULL,
+  blob_id VARCHAR NOT NULL,
+  uploaded_at TIMESTAMP,
+  PRIMARY KEY (peer, blob_id)
+);
+CREATE TABLE IF NOT EXISTS "idx_snapshots" (
+  index_name TEXT NOT NULL PRIMARY KEY,
   data BLOB NOT NULL,
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS "sync_metadata" (
-  key TEXT PRIMARY KEY NOT NULL,
-  data BLOB NOT NULL,
-  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+CREATE TABLE IF NOT EXISTS "indexer_sync" (
+  doc_id VARCHAR NOT NULL PRIMARY KEY,
+  indexed_clock TIMESTAMP NOT NULL DEFAULT 0,
+  indexer_version INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS "peer_clocks_doc_id" ON peer_clocks (doc_id);
+CREATE INDEX IF NOT EXISTS "peer_blob_sync_peer" ON peer_blob_sync (peer);
 `;
 
 const DOC_LIST_QUERY = `query WorkspaceDocs($workspaceId: String!) {
@@ -207,7 +299,7 @@ async function readAllDocIdsFromTimestamps(
   }
 }
 
-async function downloadBinary(url: string, headers: Record<string, string>): Promise<Uint8Array> {
+async function downloadBinary(url: string, headers: Record<string, string>): Promise<{ data: Uint8Array; mimeType: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
   try {
@@ -223,7 +315,8 @@ async function downloadBinary(url: string, headers: Record<string, string>): Pro
     if (buffer.byteLength > MAX_RESPONSE_BYTES) {
       throw new Error(`response too large (${buffer.byteLength} bytes > ${MAX_RESPONSE_BYTES})`);
     }
-    return new Uint8Array(buffer);
+    const mimeType = (res.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim();
+    return { data: new Uint8Array(buffer), mimeType };
   } finally {
     clearTimeout(timer);
   }
@@ -302,11 +395,11 @@ export function registerWorkspaceExportTools(
     const skippedMissingSubDocs: string[] = [];
     await mapLimit([...docIds], DOWNLOAD_CONCURRENCY, async (docId) => {
       try {
-        const bin = await downloadBinary(
+        const { data } = await downloadBinary(
           `${baseUrl}/api/workspaces/${wsPart}/docs/${encodeURIComponent(docId)}`,
           headers
         );
-        docBins.set(docId, bin);
+        docBins.set(docId, data);
       } catch (err) {
         if (probedCandidates.has(docId)) {
           // Probe only: this sub-doc was never created in this workspace.
@@ -337,16 +430,16 @@ export function registerWorkspaceExportTools(
     }
 
     // 4. Download blobs (best-effort; missing blobs are reported, not fatal).
-    const blobData = new Map<string, Uint8Array>();
+    const blobData = new Map<string, { data: Uint8Array; mimeType: string }>();
     const blobFailures: Array<{ key: string; error: string }> = [];
     if (includeBlobs && blobKeys.size > 0) {
       await mapLimit([...blobKeys], DOWNLOAD_CONCURRENCY, async (key) => {
         try {
-          const data = await downloadBinary(
+          const result = await downloadBinary(
             `${baseUrl}/api/workspaces/${wsPart}/blobs/${encodeURIComponent(key)}`,
             headers
           );
-          blobData.set(key, data);
+          blobData.set(key, result);
         } catch (err) {
           blobFailures.push({ key, error: (err as Error).message });
         }
@@ -380,30 +473,55 @@ export function registerWorkspaceExportTools(
 
     const db = new DatabaseSync(outputPath);
     try {
-      db.exec(NBSTORE_V1_SCHEMA);
-      db.prepare("INSERT INTO version_info (version) VALUES (?)").run(3);
+      db.exec(NBSTORE_V2_SCHEMA);
 
-      const insertUpdate = db.prepare("INSERT INTO updates (data, doc_id) VALUES (?, ?)");
-      for (const [docId, bin] of docBins) {
-        // nbstore v1 convention (WorkspaceSQLiteDB.toDBDocId): the workspace
-        // root doc is stored with doc_id = NULL; only regular docs carry their
-        // docId. Writing the old workspace id here makes the imported workspace
-        // unreadable because the new workspace looks up its root doc via
-        // `WHERE doc_id IS NULL`.
-        const dbDocId = docId === workspaceId ? null : docId;
-        insertUpdate.run(bin, dbDocId);
+      // Record all 4 sqlx migrations as applied so the desktop's migrate()
+      // (run inside set_space_id -> connect()) becomes a no-op instead of
+      // re-running init_v2 and failing on the already-existing tables.
+      const insertMigration = db.prepare(
+        "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time) VALUES (?, ?, ?, 1, ?, 0)"
+      );
+      const migrationTime = new Date().toISOString().replace("T", " ").slice(0, 23);
+      for (const m of SQLX_MIGRATIONS) {
+        insertMigration.run(m.version, m.description, migrationTime, Buffer.from(m.checksumHex, "hex"));
       }
 
-      const insertBlob = db.prepare("INSERT INTO blobs (key, data) VALUES (?, ?)");
-      for (const [key, data] of blobData) {
-        insertBlob.run(key, data);
+      // meta.space_id is the workspace id; the import's setSpaceId() rewrites
+      // it (plus the root doc's doc_id in snapshots/updates/clocks) to the new
+      // workspace id on the desktop.
+      db.prepare("INSERT INTO meta (space_id) VALUES (?)").run(workspaceId);
+
+      // snapshots: one row per doc. doc_id for the root doc is the workspace
+      // id (setSpaceId rewrites it); sub-docs use the desktop form db$<table>
+      // (no workspace id) so WorkspaceDB finds db$explorerIcon / db$folders /
+      // db$docProperties after import.
+      const now = new Date().toISOString().replace("T", " ").slice(0, 23);
+      const insertSnapshot = db.prepare(
+        "INSERT INTO snapshots (doc_id, data, created_at, updated_at) VALUES (?, ?, ?, ?)"
+      );
+      const insertClock = db.prepare("INSERT INTO clocks (doc_id, timestamp) VALUES (?, ?)");
+      for (const [docId, bin] of docBins) {
+        const dbDocId = docId === workspaceId ? workspaceId : toDesktopSubDocId(docId, workspaceId);
+        insertSnapshot.run(dbDocId, bin, now, now);
+        insertClock.run(dbDocId, now);
+      }
+
+      // updates: keep empty (snapshots carry the full state; AFFiNE reads the
+      // snapshot first and treats missing updates as "no pending changes").
+
+      // blobs: full metadata so the desktop can resolve attachment mime/size.
+      const insertBlob = db.prepare(
+        "INSERT INTO blobs (key, data, mime, size, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, NULL)"
+      );
+      for (const [key, { data, mimeType }] of blobData) {
+        insertBlob.run(key, data, mimeType || "application/octet-stream", data.byteLength, now);
       }
     } finally {
       db.close();
     }
 
     const totalDocBytes = [...docBins.values()].reduce((sum, bin) => sum + bin.byteLength, 0);
-    const totalBlobBytes = [...blobData.values()].reduce((sum, data) => sum + data.byteLength, 0);
+    const totalBlobBytes = [...blobData.values()].reduce((sum, data) => sum + data.data.byteLength, 0);
 
     return text({
       success: true,
