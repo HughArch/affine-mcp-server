@@ -492,6 +492,7 @@ export function registerWorkspaceExportTools(
     }
 
     const db = new DatabaseSync(outputPath);
+    let deduped: Map<string, { bin: Uint8Array; current: boolean }>;
     try {
       db.exec(NBSTORE_V2_SCHEMA);
 
@@ -515,13 +516,28 @@ export function registerWorkspaceExportTools(
       // id (setSpaceId rewrites it); sub-docs use the desktop form db$<table>
       // (no workspace id) so WorkspaceDB finds db$explorerIcon / db$folders /
       // db$docProperties after import.
+      //
+      // The same desktop doc_id can come from multiple server doc ids when a
+      // workspace carries both legacy (db$<table>) and current
+      // (db$<workspaceId>$<table>) sub-doc forms (e.g. after a workspace
+      // restore). Deduplicate by the converted id, preferring the current
+      // (namespaced) form — it is the authoritative server layout — over the
+      // legacy one.
       const now = new Date().toISOString().replace("T", " ").slice(0, 23);
+      deduped = new Map<string, { bin: Uint8Array; current: boolean }>();
+      for (const [docId, bin] of docBins) {
+        const dbDocId = docId === workspaceId ? workspaceId : toDesktopSubDocId(docId, workspaceId);
+        const isCurrent = docId.startsWith(`db$${workspaceId}$`) || docId.startsWith(`userdata$`);
+        const existing = deduped.get(dbDocId);
+        if (!existing || (isCurrent && !existing.current)) {
+          deduped.set(dbDocId, { bin, current: isCurrent });
+        }
+      }
       const insertSnapshot = db.prepare(
         "INSERT INTO snapshots (doc_id, data, created_at, updated_at) VALUES (?, ?, ?, ?)"
       );
       const insertClock = db.prepare("INSERT INTO clocks (doc_id, timestamp) VALUES (?, ?)");
-      for (const [docId, bin] of docBins) {
-        const dbDocId = docId === workspaceId ? workspaceId : toDesktopSubDocId(docId, workspaceId);
+      for (const [dbDocId, { bin }] of deduped) {
         insertSnapshot.run(dbDocId, bin, now, now);
         insertClock.run(dbDocId, now);
       }
@@ -540,7 +556,7 @@ export function registerWorkspaceExportTools(
       db.close();
     }
 
-    const totalDocBytes = [...docBins.values()].reduce((sum, bin) => sum + bin.byteLength, 0);
+    const totalDocBytes = [...deduped.values()].reduce((sum, { bin }) => sum + bin.byteLength, 0);
     const totalBlobBytes = [...blobData.values()].reduce((sum, data) => sum + data.data.byteLength, 0);
 
     return text({
@@ -548,7 +564,7 @@ export function registerWorkspaceExportTools(
       workspaceId,
       filePath: outputPath,
       format: "affine",
-      docCount: docBins.size,
+      docCount: deduped.size,
       blobCount: blobData.size,
       blobSkipped: !includeBlobs && blobKeys.size > 0 ? blobKeys.size : 0,
       docDownloadFailures: docFailures,
