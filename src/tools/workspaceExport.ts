@@ -63,11 +63,22 @@ function workspaceSubDocCandidates(workspaceId: string): string[] {
  * the server-side guid to the desktop-visible `db$<table>` form so icons,
  * folders and doc properties survive the import. Unknown/plain doc ids pass
  * through unchanged.
+ *
+ * Userdata docs (favorites/settings) follow the same scheme with a different
+ * prefix (packages/common/nbstore/src/utils/id-converter.ts): the server stores
+ * `userdata$<userId>$<workspaceId>$<table>` while the desktop's local workspace
+ * reads `userdata$__local__$<table>`. Convert those too so favorites survive
+ * the import into the new local workspace.
  */
 function toDesktopSubDocId(docId: string, workspaceId: string): string {
-  const prefix = `db$${workspaceId}$`;
-  if (docId.startsWith(prefix)) {
-    return `db$${docId.slice(prefix.length)}`;
+  const dbPrefix = `db$${workspaceId}$`;
+  if (docId.startsWith(dbPrefix)) {
+    return `db$${docId.slice(dbPrefix.length)}`;
+  }
+  // userdata$<userId>$<workspaceId>$<table> -> userdata$__local__$<table>
+  const userdataMatch = docId.match(new RegExp(`^userdata\\$[\\w-]+\\$${workspaceId}\\$(.+)$`));
+  if (userdataMatch) {
+    return `userdata$__local__$${userdataMatch[1]}`;
   }
   return docId;
 }
@@ -446,7 +457,7 @@ export function registerWorkspaceExportTools(
       });
     }
 
-    // 5. Write the nbstore-v1 SQLite database.
+    // 5. Write the nbstore-v2 SQLite database.
     // Priority: explicit outputPath > AFFINE_EXPORT_DIR > system temp dir.
     const outputPath =
       params.outputPath?.trim() ||
@@ -454,6 +465,15 @@ export function registerWorkspaceExportTools(
         ? path.join(defaults.exportDir, `affine-mcp-export-${workspaceId}-${Date.now()}.affine`)
         : path.join(os.tmpdir(), `affine-mcp-export-${workspaceId}-${Date.now()}.affine`));
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+    // The output file may already exist from a previous run (e.g. the same
+    // explicit outputPath was used before). Remove it so we start from a fresh
+    // database: otherwise `CREATE TABLE IF NOT EXISTS` is a no-op and the
+    // subsequent INSERTs collide with the leftover primary keys
+    // (snapshots.doc_id / _sqlx_migrations.version) → UNIQUE constraint failure.
+    if (fs.existsSync(outputPath)) {
+      fs.rmSync(outputPath, { force: true });
+    }
 
     let DatabaseSync: new (location: string) => {
       exec(sql: string): void;
