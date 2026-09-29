@@ -602,6 +602,20 @@ type AppendBlockInput = {
     gap?: number;
   };
   padding?: number;
+  calloutColor?: string;
+  calloutIcon?: string;
+  collapsed?: boolean;
+  // Edgeless block styling — validated per-type in validateNormalizedAppendBlockInput.
+  displayMode?: "page" | "edgeless" | "both";
+  borderRadius?: number;
+  borderSize?: number;
+  borderStyle?: "solid" | "dash" | "none";
+  shadowType?: string;
+  color?: string | { light?: string; dark?: string };
+  fontFamily?: string;
+  fontStyle?: "normal" | "italic";
+  fontWeight?: string;
+  textAlign?: "left" | "center" | "right";
 };
 
 type UpdateTableCellInput = {
@@ -763,6 +777,19 @@ type NormalizedAppendBlockInput = {
   heightProvided?: boolean;
   widthProvided?: boolean;
   markdown?: string;
+  calloutColor: string;
+  calloutIcon: string;
+  collapsed: boolean;
+  displayMode: "page" | "edgeless" | "both";
+  borderRadius: number;
+  borderSize: number;
+  borderStyle: "solid" | "dash" | "none";
+  shadowType: string;
+  color: string | { light?: string; dark?: string };
+  fontFamily: string;
+  fontStyle: "normal" | "italic";
+  fontWeight: string;
+  textAlign: "left" | "center" | "right";
   // Resolved by resolveEdgelessLayoutHints from `childElementIds`; carries
   // both the ids to write and the ones that didn't resolve for the receipt.
   _frameOwnedIds?: string[];
@@ -2138,7 +2165,12 @@ export function registerDocTools(
       throw new Error("The 'reference'/'refFlavour' fields can only be used with type='surface_ref'.");
     }
 
-    if (normalized.type === "frame" || normalized.type === "edgeless_text" || normalized.type === "note") {
+    const isEdgelessPlaceable =
+      normalized.type === "frame" ||
+      normalized.type === "edgeless_text" ||
+      normalized.type === "note" ||
+      (CANVAS_EMBED_TYPES.has(normalized.type) && (raw.x !== undefined || raw.y !== undefined));
+    if (isEdgelessPlaceable) {
       if (!Number.isInteger(normalized.width) || normalized.width < 1 || normalized.width > 10000) {
         throw new Error(`${normalized.type} width must be an integer between 1 and 10000.`);
       }
@@ -2146,11 +2178,59 @@ export function registerDocTools(
         throw new Error(`${normalized.type} height must be an integer between 1 and 10000.`);
       }
     } else if ((raw.width !== undefined || raw.height !== undefined) && normalized.strict) {
-      throw new Error("The 'width'/'height' fields are only valid for frame/edgeless_text/note.");
+      throw new Error("The 'width'/'height' fields are only valid for edgeless blocks (frame/edgeless_text/note) or canvas-positioned image/attachment/bookmark/embed blocks (pass x or y to place on canvas).");
     }
 
     if (normalized.type !== "frame" && normalized.type !== "note" && raw.background !== undefined && normalized.strict) {
       throw new Error("The 'background' field is only valid for frame/note.");
+    }
+
+    const CALLOUT_COLOR_TOKENS = [
+      "transparent",
+      "red",
+      "orange",
+      "yellow",
+      "green",
+      "teal",
+      "blue",
+      "purple",
+      "magenta",
+      "grey",
+      "black",
+      "white",
+    ] as const;
+    if (normalized.type === "callout") {
+      if (!(CALLOUT_COLOR_TOKENS as readonly string[]).includes(normalized.calloutColor)) {
+        throw new Error(`Invalid calloutColor '${normalized.calloutColor}'. Valid values: ${CALLOUT_COLOR_TOKENS.join(" / ")}.`);
+      }
+    } else if (raw.calloutColor !== undefined && normalized.strict) {
+      throw new Error("The 'calloutColor' field is only valid for type='callout'.");
+    }
+    if (normalized.type !== "callout" && raw.calloutIcon !== undefined && normalized.strict) {
+      throw new Error("The 'calloutIcon' field is only valid for type='callout'.");
+    }
+    if (normalized.type !== "list" && raw.collapsed !== undefined && normalized.strict) {
+      throw new Error("The 'collapsed' field is only valid for type='list'.");
+    }
+
+    // Note edgeless styling: displayMode + border/shadow. Edgeless-text
+    // styling: color/fontFamily/fontStyle/fontWeight/textAlign. Each field is
+    // only valid for its owning flavour (strict mode).
+    const EDGELESS_NOTE_STYLE_FIELDS = ["displayMode", "borderRadius", "borderSize", "borderStyle", "shadowType"] as const;
+    if (normalized.type !== "note") {
+      for (const field of EDGELESS_NOTE_STYLE_FIELDS) {
+        if (raw[field as keyof AppendBlockInput] !== undefined && normalized.strict) {
+          throw new Error(`The '${field}' field is only valid for type='note'.`);
+        }
+      }
+    }
+    const EDGELESS_TEXT_STYLE_FIELDS = ["color", "fontFamily", "fontStyle", "fontWeight", "textAlign"] as const;
+    if (normalized.type !== "edgeless_text") {
+      for (const field of EDGELESS_TEXT_STYLE_FIELDS) {
+        if (raw[field as keyof AppendBlockInput] !== undefined && normalized.strict) {
+          throw new Error(`The '${field}' field is only valid for type='edgeless_text'.`);
+        }
+      }
     }
 
     if (normalized.type === "table") {
@@ -2191,6 +2271,61 @@ export function registerDocTools(
     if (normalized.type !== "database" && normalized.type !== "data_view" && raw.viewMode !== undefined && normalized.strict) {
       throw new Error("The 'viewMode' field can only be used with type='database' or type='data_view'.");
     }
+  }
+
+  // Block types that can be positioned on the edgeless canvas (as gfx blocks)
+  // when the caller supplies explicit x/y — everything else stays a doc block.
+  const CANVAS_EMBED_TYPES = new Set<string>([
+    "image",
+    "attachment",
+    "bookmark",
+    "embed_youtube",
+    "embed_github",
+    "embed_figma",
+    "embed_loom",
+    "embed_html",
+    "embed_linked_doc",
+    "embed_synced_doc",
+    "embed_iframe",
+  ]);
+
+  // Block flavours that can be positioned on the edgeless canvas with xywh.
+  const CANVAS_EMBED_FLAVOURS = new Set<string>([
+    "affine:image",
+    "affine:attachment",
+    "affine:bookmark",
+    "affine:embed-youtube",
+    "affine:embed-github",
+    "affine:embed-figma",
+    "affine:embed-loom",
+    "affine:embed-html",
+    "affine:embed-linked-doc",
+    "affine:embed-synced-doc",
+    "affine:embed-iframe",
+  ]);
+
+  const SURFACE_FONT_FAMILY_MAP: Record<string, string> = {
+    Inter: "blocksuite:surface:Inter",
+    Poppins: "blocksuite:surface:Poppins",
+  };
+
+  function normalizeSurfaceFontFamily(value: unknown, fallback: string): string {
+    if (typeof value !== "string" || value.trim().length === 0) return fallback;
+    const trimmed = value.trim();
+    return SURFACE_FONT_FAMILY_MAP[trimmed] ?? trimmed;
+  }
+
+  function normalizeSurfaceFontWeight(value: unknown, fallback: string): string {
+    if (typeof value !== "string" || value.trim().length === 0) return fallback;
+    const trimmed = value.trim().toLowerCase();
+    const alias: Record<string, string> = {
+      regular: "400",
+      normal: "400",
+      medium: "500",
+      semibold: "600",
+      bold: "700",
+    };
+    return alias[trimmed] ?? trimmed;
   }
 
   function normalizeAppendBlockInput(parsed: AppendBlockInput): NormalizedAppendBlockInput {
@@ -2242,6 +2377,34 @@ export function registerDocTools(
     const plainText = Array.isArray(parsed.text)
       ? parsed.text.map(delta => delta.insert).join("")
       : parsed.text ?? "";
+    const calloutColor = (typeof parsed.calloutColor === "string" ? parsed.calloutColor.trim() : "") || "grey";
+    const calloutIcon = (typeof parsed.calloutIcon === "string" ? parsed.calloutIcon.trim() : "") || "💡";
+    const collapsed = parsed.collapsed === true;
+
+    const displayMode = (["page", "edgeless", "both"] as const).includes(parsed.displayMode as any)
+      ? (parsed.displayMode as "page" | "edgeless" | "both")
+      : "both";
+    const borderRadius = Number.isFinite(parsed.borderRadius) ? Math.max(0, Math.floor(parsed.borderRadius as number)) : 8;
+    const borderSize = Number.isFinite(parsed.borderSize) ? Math.max(0, Math.floor(parsed.borderSize as number)) : 1;
+    const borderStyle = (["solid", "dash", "none"] as const).includes(parsed.borderStyle as any)
+      ? (parsed.borderStyle as "solid" | "dash" | "none")
+      : "solid";
+    const shadowType =
+      typeof parsed.shadowType === "string" && parsed.shadowType.trim().length > 0
+        ? parsed.shadowType.trim()
+        : "none";
+    const color: string | { light?: string; dark?: string } =
+      parsed.color && typeof parsed.color === "object" && !Array.isArray(parsed.color)
+        ? { light: parsed.color.light, dark: parsed.color.dark }
+        : typeof parsed.color === "string"
+          ? (parsed.color.trim() || "--affine-text-primary-color")
+          : "--affine-text-primary-color";
+    const fontFamily = normalizeSurfaceFontFamily(parsed.fontFamily, "blocksuite:surface:Inter");
+    const fontStyle = parsed.fontStyle === "italic" ? "italic" : "normal";
+    const fontWeight = normalizeSurfaceFontWeight(parsed.fontWeight, "400");
+    const textAlign = (["left", "center", "right"] as const).includes(parsed.textAlign as any)
+      ? (parsed.textAlign as "left" | "center" | "right")
+      : "left";
 
     const normalized: NormalizedAppendBlockInput = {
       workspaceId: parsed.workspaceId,
@@ -2289,6 +2452,19 @@ export function registerDocTools(
       widthProvided,
       heightProvided,
       markdown: typeof parsed.markdown === "string" ? parsed.markdown : undefined,
+      calloutColor,
+      calloutIcon,
+      collapsed,
+      displayMode,
+      borderRadius,
+      borderSize,
+      borderStyle,
+      shadowType,
+      color,
+      fontFamily,
+      fontStyle,
+      fontWeight,
+      textAlign,
     };
 
     validateNormalizedAppendBlockInput(normalized, parsed);
@@ -2357,7 +2533,7 @@ export function registerDocTools(
 
   function resolveInsertContext(
     blocks: Y.Map<any>,
-    normalized: Pick<NormalizedAppendBlockInput, "placement" | "strict" | "type">,
+    normalized: Pick<NormalizedAppendBlockInput, "placement" | "strict" | "type" | "xProvided" | "yProvided">,
   ): {
     parentId: string;
     parentBlock: Y.Map<any>;
@@ -2402,6 +2578,10 @@ export function registerDocTools(
         if (!parentId) {
           throw new Error("Document has no page block; unable to insert note.");
         }
+      } else if (CANVAS_EMBED_TYPES.has(normalized.type) && (normalized.xProvided || normalized.yProvided)) {
+        // Canvas-positioned embed/image/attachment/bookmark blocks live on the
+        // surface like any other gfx block (native AFFiNE behavior).
+        parentId = ensureSurfaceBlock(blocks);
       } else {
         parentId = ensureNoteBlock(blocks);
       }
@@ -2418,7 +2598,8 @@ export function registerDocTools(
       if (
         parentFlavour === "affine:surface" &&
         normalized.type !== "frame" &&
-        normalized.type !== "edgeless_text"
+        normalized.type !== "edgeless_text" &&
+        !(CANVAS_EMBED_TYPES.has(normalized.type) && (normalized.xProvided || normalized.yProvided))
       ) {
         throw new Error(`Cannot append '${normalized.type}' directly under 'affine:surface'.`);
       }
@@ -2689,6 +2870,12 @@ export function registerDocTools(
     };
   }
 
+  function canvasXywh(normalized: NormalizedAppendBlockInput, fallback = "[0,0,0,0]"): string {
+    return normalized.xProvided || normalized.yProvided
+      ? `[${normalized.x},${normalized.y},${normalized.width},${normalized.height}]`
+      : fallback;
+  }
+
   function createBlock(normalized: NormalizedAppendBlockInput): {
     blockId: string;
     block: Y.Map<any>;
@@ -2725,6 +2912,11 @@ export function registerDocTools(
         block.set("prop:type", normalized.listStyle);
         block.set("prop:checked", normalized.listStyle === "todo" ? normalized.checked : false);
         block.set("prop:text", makeText(normalized.deltas ?? content));
+        // prop:collapsed is BlockSuite's folding state: true collapses any
+        // child blocks (the toggle arrow appears when children exist).
+        if (normalized.collapsed) {
+          block.set("prop:collapsed", true);
+        }
         return { blockId, block, flavour: "affine:list", blockType: normalized.listStyle };
       }
       case "code": {
@@ -2842,7 +3034,7 @@ export function registerDocTools(
         block.set("prop:icon", null);
         block.set("prop:image", null);
         block.set("prop:title", null);
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:index", "a0");
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
@@ -2858,7 +3050,7 @@ export function registerDocTools(
         block.set("prop:width", 0);
         block.set("prop:height", 0);
         block.set("prop:size", normalized.size || -1);
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:index", "a0");
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
@@ -2876,7 +3068,7 @@ export function registerDocTools(
         block.set("prop:embed", normalized.embed);
         block.set("prop:style", "horizontalThin");
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:footnoteIdentifier", null);
@@ -2887,7 +3079,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "video");
@@ -2907,7 +3099,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "horizontal");
@@ -2931,7 +3123,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "figma");
@@ -2946,7 +3138,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "video");
@@ -2963,7 +3155,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "html");
@@ -2977,7 +3169,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "horizontal");
@@ -2993,7 +3185,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,800,100]");
+        block.set("prop:xywh", canvasXywh(normalized, "[0,0,800,100]"));
         block.set("prop:lockedBySelf", false);
         block.set("prop:rotate", 0);
         block.set("prop:style", "syncedDoc");
@@ -3010,7 +3202,7 @@ export function registerDocTools(
         block.set("sys:parent", null);
         block.set("sys:children", new Y.Array<string>());
         block.set("prop:index", "a0");
-        block.set("prop:xywh", "[0,0,0,0]");
+        block.set("prop:xywh", canvasXywh(normalized));
         block.set("prop:lockedBySelf", false);
         block.set("prop:scale", 1);
         block.set("prop:url", normalized.url);
@@ -3090,11 +3282,11 @@ export function registerDocTools(
         block.set("prop:hasMaxWidth", false);
         block.set("prop:comments", undefined);
         // Theme-adaptive token so canvas text stays legible in dark mode.
-        block.set("prop:color", "--affine-text-primary-color");
-        block.set("prop:fontFamily", "Inter");
-        block.set("prop:fontStyle", "normal");
-        block.set("prop:fontWeight", "regular");
-        block.set("prop:textAlign", "left");
+        block.set("prop:color", normalized.color);
+        block.set("prop:fontFamily", normalized.fontFamily);
+        block.set("prop:fontStyle", normalized.fontStyle);
+        block.set("prop:fontWeight", normalized.fontWeight);
+        block.set("prop:textAlign", normalized.textAlign);
         const edgelessTextExtraBlocks: Array<{ blockId: string; block: Y.Map<any> }> = [];
         if (content || normalized.deltas?.some(delta => delta.insert.length > 0)) {
           const paraId = generateId();
@@ -3129,13 +3321,13 @@ export function registerDocTools(
         block.set("prop:index", "a0");
         block.set("prop:lockedBySelf", false);
         block.set("prop:hidden", false);
-        block.set("prop:displayMode", "both");
+        block.set("prop:displayMode", normalized.displayMode);
         const edgeless = new Y.Map<any>();
         const style = new Y.Map<any>();
-        style.set("borderRadius", 8);
-        style.set("borderSize", 1);
-        style.set("borderStyle", "solid");
-        style.set("shadowType", "none");
+        style.set("borderRadius", normalized.borderRadius);
+        style.set("borderSize", normalized.borderSize);
+        style.set("borderStyle", normalized.borderStyle);
+        style.set("shadowType", normalized.shadowType);
         edgeless.set("style", style);
         block.set("prop:edgeless", edgeless);
         block.set("prop:comments", undefined);
@@ -6107,6 +6299,7 @@ export function registerDocTools(
         tableColumnWidths?: Array<number | null>;
         linkedDocIds: string[];
         checked: boolean | null;
+        collapsed: boolean | null;
         language: string | null;
         childIds: string[];
       }> = [];
@@ -6130,6 +6323,7 @@ export function registerDocTools(
         const linkedDocIds = extractLinkedPageRefs(propText);
         const language = raw.get("prop:language");
         const checked = raw.get("prop:checked");
+        const collapsed = raw.get("prop:collapsed");
         const childIds = childIdsFrom(raw.get("sys:children"));
 
         if (flavour === "affine:page") {
@@ -6153,6 +6347,7 @@ export function registerDocTools(
           } : {}),
           linkedDocIds,
           checked: typeof checked === "boolean" ? checked : null,
+          collapsed: typeof collapsed === "boolean" ? collapsed : null,
           language: typeof language === "string" ? language : null,
           childIds,
         });
@@ -6825,10 +7020,10 @@ export function registerDocTools(
         design: z.string().optional().describe("Design payload for embed_html"),
         reference: z.string().optional().describe("Target id for surface_ref"),
         refFlavour: z.string().optional().describe("Target flavour for surface_ref (e.g. affine:frame)"),
-        x: z.number().int().optional().describe("X position on the edgeless canvas for frame/edgeless_text/note (default 0). Prefer ≥40px between sibling bounds; BlockSuite does not auto-arrange."),
-        y: z.number().int().optional().describe("Y position on the edgeless canvas for frame/edgeless_text/note (default 0)."),
-        width: z.number().int().min(1).max(10000).optional().describe("Width for frame/edgeless_text/note."),
-        height: z.number().int().min(1).max(10000).optional().describe("Height for frame/edgeless_text/note. When `markdown` is set and height is omitted, an over-estimate is computed from the content — AFFiNE's render-time ResizeObserver corrects `prop:xywh` to the true DOM-measured height on first browser open."),
+        x: z.number().int().optional().describe("X position on the edgeless canvas for frame/edgeless_text/note and canvas-positioned image/attachment/bookmark/embed blocks (pass x or y to place those on canvas; default 0). Prefer ≥40px between sibling bounds; BlockSuite does not auto-arrange."),
+        y: z.number().int().optional().describe("Y position on the edgeless canvas for frame/edgeless_text/note and canvas-positioned image/attachment/bookmark/embed blocks (pass x or y to place those on canvas; default 0)."),
+        width: z.number().int().min(1).max(10000).optional().describe("Width for frame/edgeless_text/note and canvas-positioned image/attachment/bookmark/embed blocks (requires x or y for those)."),
+        height: z.number().int().min(1).max(10000).optional().describe("Height for frame/edgeless_text/note and canvas-positioned image/attachment/bookmark/embed blocks (requires x or y for those). When `markdown` is set and height is omitted, an over-estimate is computed from the content — AFFiNE's render-time ResizeObserver corrects `prop:xywh` to the true DOM-measured height on first browser open."),
         background: z.any().optional().describe("Background for frame/note. Frame default 'transparent'. For notes, prefer AFFiNE's adaptive `--affine-note-background-<color>` family — `blue` / `purple` / `yellow` / `green` / `teal` / `red` / `orange` / `magenta` / `grey` / `white` / `black`. For specific per-theme colors, pass a `{light, dark}` hex object like `{light:'#fff', dark:'#252525'}`."),
         markdown: z.string().optional().describe("When type='note', parse this markdown into heading/paragraph/list/code child blocks inside the note (BlockSuite-native: mirrors what happens when you paste markdown into an edgeless note). Takes precedence over 'text' for note children. Ignored for other block types."),
         childElementIds: z.array(z.string()).optional().describe("For type='frame' only. The frame's contents. Accepts ids of surface elements (shapes/connectors/groups) AND edgeless blocks (notes/frames/edgeless-text) — BlockSuite's prop:childElementIds holds both, matching what the editor writes when you drag a note into a frame. Dragging the frame drags every owned member. Ids that don't resolve come back under 'missing'. When width/height are omitted the frame is sized to the union of resolvable child bounds + padding + a 30px title band."),
@@ -6838,6 +7033,22 @@ export function registerDocTools(
           gap: z.number().int().optional().describe("Gap in px between the anchor and the new block. Default is direction-aware: 80 for left/right, 40 for down/up — mirrors native-flowchart spacing where the flow axis gets more breathing room than the cross axis. Explicit `padding` on the block overrides this default; explicit `gap` wins over both."),
         }).optional().describe("Layout helper — position this block relative to one or more existing edgeless blocks. Picks the furthest anchor in `direction` for the stack axis, and centers the new block on the anchor group's union on the orthogonal axis (matches how BlockSuite aligns selection-derived blocks; reduces to inherit-anchor-x when widths match). Caller-provided x/y on the orthogonal axis still wins. Works for frame/note/edgeless_text. Example: `stackAfter: { blockId: [f1, f2, f3], gap: 80 }` stacks below whichever column frame ends lowest, centered across all three. Note heights shift at first render (page-root grows with the title, content notes shrink/grow with their children); give extra gap and fix up with `update_edgeless_block` if the down/right chain drifts."),
         padding: z.number().int().optional().describe("Default padding (px) for `childElementIds` auto-sizing on frames (each side, plus +30px title band) and fallback gap for `stackAfter` (default 40)."),
+        displayMode: z.enum(["page", "edgeless", "both"]).optional().describe("Note only. Where the note renders: 'page' = page mode only, 'edgeless' = edgeless only, 'both' = everywhere (default both)."),
+        borderRadius: z.number().int().optional().describe("Note only. Corner radius (px) of the note card (default 8)."),
+        borderSize: z.number().int().optional().describe("Note only. Border thickness (px) of the note card (default 1)."),
+        borderStyle: z.enum(["solid", "dash", "none"]).optional().describe("Note only. Border style of the note card (default solid)."),
+        shadowType: z.string().optional().describe("Note only. Shadow style token, e.g. 'none' or '--affine-note-shadow-sticker' (default none)."),
+        color: z
+          .union([
+            z.string(),
+            z.object({ light: z.string().optional(), dark: z.string().optional() }),
+          ])
+          .optional()
+          .describe("Edgeless-text only. Text color — theme token, hex, or `{light, dark}` pair (default '--affine-text-primary-color')."),
+        fontFamily: z.string().optional().describe("Edgeless-text only. Font family (friendly name like 'Inter'/'Poppins' or full 'blocksuite:surface:Inter' form; default Inter)."),
+        fontStyle: z.enum(["normal", "italic"]).optional().describe("Edgeless-text only. Font style (default normal)."),
+        fontWeight: z.string().optional().describe("Edgeless-text only. Font weight (default 400; accepts 'regular'/'medium'/'bold' aliases)."),
+        textAlign: z.enum(["left", "center", "right"]).optional().describe("Edgeless-text only. Text alignment (default left)."),
         sourceId: z.string()
           .refine(isSafeBlobSourceIdInput, "sourceId must be an opaque AFFiNE blob key")
           .optional()
@@ -6856,8 +7067,11 @@ export function registerDocTools(
         bookmarkStyle: AppendBlockBookmarkStyle.optional().describe("Bookmark card style"),
         viewMode: AppendBlockDataViewMode.optional().describe("Initial data view preset for type=database or type=data_view. Defaults: database=table, data_view=kanban"),
         checked: z.boolean().optional().describe("Todo state when type is todo"),
+        collapsed: z.boolean().optional().describe("When type=list, fold the block's child items by default (BlockSuite prop:collapsed). Only has a visible effect when the block has children — add child blocks (e.g. via append_block into this block) to see the toggle arrow in a collapsed state. Default false (expanded)."),
         language: z.string().optional().describe("Code language when type is code"),
         caption: z.string().optional().describe("Code caption when type is code"),
+        calloutColor: z.string().optional().describe("Background palette token for type=callout. Valid: transparent / red / orange / yellow / green / teal / blue / purple / magenta / grey / black / white. Default 'grey'. Maps to AFFiNE prop:backgroundColorName."),
+        calloutIcon: z.string().optional().describe("Emoji for type=callout icon (default '💡'). Any single emoji character."),
         strict: z.boolean().optional().describe("Strict validation mode (default true)"),
         placement: z
           .object({
@@ -9239,7 +9453,7 @@ export function registerDocTools(
     addDatabaseColumnHandler as any
   );
 
-  type SurfaceElementType = "shape" | "connector" | "text" | "group";
+  type SurfaceElementType = "shape" | "connector" | "text" | "group" | "brush";
 
   type SurfaceElementFields = {
     x?: number;
@@ -9254,7 +9468,7 @@ export function registerDocTools(
     strokeWidth?: number;
     strokeStyle?: "solid" | "dash" | "none";
     text?: string;
-    color?: string;
+    color?: string | { light?: string; dark?: string };
     fontSize?: number;
     fontWeight?: string;
     sourceId?: string;
@@ -9269,6 +9483,29 @@ export function registerDocTools(
     children?: string[];
     title?: string;
     index?: string;
+    // Newly exposed surface styling.
+    rotate?: number;
+    shapeStyle?: "General" | "Scribbled";
+    roughness?: number;
+    shadow?: { offsetX?: number; offsetY?: number; blur?: number; color?: string } | null;
+    padding?: [number, number] | number[];
+    fontFamily?: string;
+    fontStyle?: "normal" | "italic";
+    textAlign?: "left" | "center" | "right";
+    // Connector label presentation.
+    rough?: boolean;
+    labelOffset?: { distance?: number; anchor?: "center" | "left" | "right" };
+    labelStyle?: {
+      color?: string;
+      fontFamily?: string;
+      fontSize?: number;
+      fontStyle?: "normal" | "italic";
+      fontWeight?: string;
+      textAlign?: "left" | "center" | "right";
+    };
+    // Brush (pen) stroke.
+    points?: Array<[number, number, number]>;
+    lineWidth?: number;
   };
 
   type AddSurfaceElementInput = SurfaceElementFields & {
@@ -9367,30 +9604,30 @@ export function registerDocTools(
       index,
       seed,
       xywh: formatXywhString(x, y, w, h),
-      rotate: 0,
+      rotate: input.rotate ?? 0,
       shapeType: input.shapeType ?? "rect",
-      shapeStyle: "General",
+      shapeStyle: input.shapeStyle ?? "General",
       radius: input.radius ?? 0,
       filled: input.filled ?? true,
       fillColor: input.fillColor ?? "--affine-palette-shape-yellow",
       strokeWidth: input.strokeWidth ?? 2,
       strokeColor: input.strokeColor ?? "--affine-palette-line-yellow",
       strokeStyle: input.strokeStyle ?? "solid",
-      roughness: 1.4,
+      roughness: input.roughness ?? 1.4,
       // Fixed #000000 matches BlockSuite's shape tool: shape fills don't
       // theme-adapt, so label color stays pinned too. Override for dark fills.
       color: input.color ?? "#000000",
-      fontFamily: "blocksuite:surface:Inter",
+      fontFamily: normalizeSurfaceFontFamily(input.fontFamily, "blocksuite:surface:Inter"),
       fontSize: input.fontSize ?? 20,
-      fontStyle: "normal",
-      fontWeight: input.fontWeight ?? "600",
-      textAlign: "center",
-      textHorizontalAlign: "center",
+      fontStyle: input.fontStyle ?? "normal",
+      fontWeight: normalizeSurfaceFontWeight(input.fontWeight, "600"),
+      textAlign: input.textAlign ?? "center",
+      textHorizontalAlign: input.textAlign ?? "center",
       textVerticalAlign: "center",
       textResizing: 1,
       maxWidth: false,
-      padding: [10, 20],
-      shadow: null,
+      padding: input.padding ?? [10, 20],
+      shadow: input.shadow !== undefined ? input.shadow : null,
     };
     if (input.text) {
       const yText = new Y.Text();
@@ -9497,19 +9734,20 @@ export function registerDocTools(
       strokeWidth: input.strokeWidth ?? 2,
       strokeStyle: input.strokeStyle ?? "solid",
       roughness: 1.4,
+      rough: input.rough ?? false,
       frontEndpointStyle: input.frontEndpointStyle ?? "None",
       rearEndpointStyle: input.rearEndpointStyle ?? "Arrow",
       source,
       target,
       labelDisplay: true,
-      labelOffset: { distance: 0.5, anchor: "center" },
+      labelOffset: input.labelOffset ?? { distance: 0.5, anchor: "center" },
       labelStyle: {
-        color: "--affine-text-primary-color",
-        fontFamily: "blocksuite:surface:Inter",
-        fontSize: 16,
-        fontStyle: "normal",
-        fontWeight: "400",
-        textAlign: "center",
+        color: input.labelStyle?.color ?? "--affine-text-primary-color",
+        fontFamily: normalizeSurfaceFontFamily(input.labelStyle?.fontFamily, "blocksuite:surface:Inter"),
+        fontSize: input.labelStyle?.fontSize ?? 16,
+        fontStyle: input.labelStyle?.fontStyle ?? "normal",
+        fontWeight: normalizeSurfaceFontWeight(input.labelStyle?.fontWeight, "400"),
+        textAlign: input.labelStyle?.textAlign ?? "center",
       },
       labelConstraints: { hasMaxWidth: true, maxWidth: 280 },
     };
@@ -9573,6 +9811,65 @@ export function registerDocTools(
     };
   }
 
+  function buildBrushElementData(
+    elementId: string,
+    seed: number,
+    index: string,
+    input: SurfaceElementFields
+  ): Record<string, any> {
+    // points are LOCAL to the stroke's own bounding box (native AFFiNE stores
+    // them that way: xywh carries the canvas origin, points start near (0,0)).
+    // The server normalizes the caller's points into that local frame and
+    // derives the xywh box from the caller-supplied x/y origin + bounds.
+    const rawPoints = Array.isArray(input.points)
+      ? input.points.filter(
+          (p): p is [number, number, number] =>
+            Array.isArray(p) &&
+            p.length >= 2 &&
+            typeof p[0] === "number" &&
+            typeof p[1] === "number"
+        )
+      : [];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of rawPoints) {
+      minX = Math.min(minX, p[0]);
+      minY = Math.min(minY, p[1]);
+      maxX = Math.max(maxX, p[0]);
+      maxY = Math.max(maxY, p[1]);
+    }
+    const hasPoints = rawPoints.length > 0;
+    const originX = input.x ?? 0;
+    const originY = input.y ?? 0;
+    const boundsW = hasPoints ? Math.max(1, Math.ceil(maxX - minX)) : (input.width ?? 1);
+    const boundsH = hasPoints ? Math.max(1, Math.ceil(maxY - minY)) : (input.height ?? 1);
+    const normalizedPoints = hasPoints
+      ? rawPoints.map(([px, py, pressure]) => {
+          const nx = Math.round((px - minX) * 100) / 100;
+          const ny = Math.round((py - minY) * 100) / 100;
+          return [nx, ny, pressure ?? 0] as [number, number, number];
+        })
+      : [];
+    return {
+      type: "brush",
+      id: elementId,
+      index,
+      seed,
+      xywh: formatXywhString(originX, originY, boundsW, boundsH),
+      rotate: 0,
+      points: normalizedPoints,
+      lineWidth: input.lineWidth ?? 4,
+      color:
+        input.color && typeof input.color === "object"
+          ? { light: input.color.light ?? "#000000", dark: input.color.dark ?? "#ffffff" }
+          : typeof input.color === "string"
+            ? input.color
+            : { light: "#000000", dark: "#ffffff" },
+    };
+  }
+
   function nextSurfaceElementIndex(valueMap: Y.Map<any>): string {
     let maxIndex: string | null = null;
     for (const [, el] of valueMap.entries()) {
@@ -9600,6 +9897,8 @@ export function registerDocTools(
         return { elementId, data: buildTextElementData(elementId, seed, index, input) };
       case "group":
         return { elementId, data: buildGroupElementData(elementId, seed, index, input) };
+      case "brush":
+        return { elementId, data: buildBrushElementData(elementId, seed, index, input) };
     }
   }
 
@@ -9763,13 +10062,27 @@ export function registerDocTools(
     strokeColor:        ["shape"],                  // connectors use top-level `stroke`
     strokeWidth:        ["shape", "connector"],
     strokeStyle:        ["shape", "connector"],
-    color:              ["shape", "text"],          // connectors use labelStyle.*
+    color:              ["shape", "text", "brush"], // connectors use labelStyle.*
     fontSize:           ["shape", "text"],
     fontWeight:         ["shape", "text"],
     stroke:             ["connector"],
     mode:               ["connector"],
     frontEndpointStyle: ["connector"],
     rearEndpointStyle:  ["connector"],
+    // Exposed surface styling — keep rows in sync with surfaceElementFieldSchemas.
+    rotate:             ["shape"],
+    shapeStyle:         ["shape"],
+    roughness:          ["shape"],
+    shadow:             ["shape"],
+    padding:            ["shape"],
+    fontFamily:         ["shape"],
+    fontStyle:          ["shape"],
+    textAlign:          ["shape"],
+    rough:              ["connector"],
+    labelOffset:        ["connector"],
+    labelStyle:         ["connector"],
+    points:             ["brush"],
+    lineWidth:          ["brush"],
   };
 
   const updateSurfaceElementHandler = async (params: UpdateSurfaceElementInput) => {
@@ -9810,7 +10123,7 @@ export function registerDocTools(
         params.width !== undefined ||
         params.height !== undefined;
       if (geomProvided) {
-        if (elementType === "shape" || elementType === "text") {
+        if (elementType === "shape" || elementType === "text" || elementType === "brush") {
           const current = parseXywhString(el.get("xywh")) ?? {
             x: 0,
             y: 0,
@@ -10108,6 +10421,16 @@ export function registerDocTools(
     width?: number;
     height?: number;
     background?: string | { light?: string; dark?: string };
+    displayMode?: "page" | "edgeless" | "both";
+    borderRadius?: number;
+    borderSize?: number;
+    borderStyle?: "solid" | "dash" | "none";
+    shadowType?: string;
+    color?: string | { light?: string; dark?: string };
+    fontFamily?: string;
+    fontStyle?: "normal" | "italic";
+    fontWeight?: string;
+    textAlign?: "left" | "center" | "right";
   }) => {
     const workspaceId = params.workspaceId || defaults.workspaceId;
     if (!workspaceId) {
@@ -10134,9 +10457,15 @@ export function registerDocTools(
         throw new Error(`Block '${params.blockId}' not found.`);
       }
       const flavour = block.get("sys:flavour");
-      if (flavour !== "affine:note" && flavour !== "affine:frame" && flavour !== "affine:edgeless-text") {
+      const EDGELESS_MUTABLE_FLAVOURS = new Set<string>([
+        "affine:note",
+        "affine:frame",
+        "affine:edgeless-text",
+        ...CANVAS_EMBED_FLAVOURS,
+      ]);
+      if (!EDGELESS_MUTABLE_FLAVOURS.has(String(flavour))) {
         throw new Error(
-          `Block '${params.blockId}' has flavour '${String(flavour)}' — update_edgeless_block only mutates note/frame/edgeless-text blocks.`
+          `Block '${params.blockId}' has flavour '${String(flavour)}' — update_edgeless_block only mutates note/frame/edgeless-text and canvas-positioned embed blocks.`
         );
       }
 
@@ -10155,9 +10484,7 @@ export function registerDocTools(
       }
 
       if (params.background !== undefined) {
-        if (flavour === "affine:edgeless-text") {
-          ignored.push("background"); // edgeless-text has no prop:background
-        } else {
+        if (flavour === "affine:note" || flavour === "affine:frame") {
           const bg = params.background;
           if (bg && typeof bg === "object" && !Array.isArray(bg) && ("light" in bg || "dark" in bg)) {
             const bgMap = new Y.Map<any>();
@@ -10168,6 +10495,87 @@ export function registerDocTools(
             block.set("prop:background", bg);
           }
           changed.push("background");
+        } else {
+          ignored.push("background"); // edgeless-text / embeds have no prop:background
+        }
+      }
+
+      if (params.displayMode !== undefined) {
+        if (flavour === "affine:note") {
+          block.set("prop:displayMode", params.displayMode);
+          changed.push("displayMode");
+        } else {
+          ignored.push("displayMode");
+        }
+      }
+
+      // Note border/shadow live in prop:edgeless.style (a nested Y.Map).
+      if (flavour === "affine:note") {
+        const hasNoteStyle =
+          params.borderRadius !== undefined ||
+          params.borderSize !== undefined ||
+          params.borderStyle !== undefined ||
+          params.shadowType !== undefined;
+        if (hasNoteStyle) {
+          let edgeless = block.get("prop:edgeless");
+          if (!(edgeless instanceof Y.Map)) {
+            edgeless = new Y.Map<any>();
+            block.set("prop:edgeless", edgeless);
+          }
+          let style = edgeless.get("style");
+          if (!(style instanceof Y.Map)) {
+            style = new Y.Map<any>();
+            edgeless.set("style", style);
+          }
+          if (params.borderRadius !== undefined) {
+            style.set("borderRadius", params.borderRadius);
+            changed.push("borderRadius");
+          }
+          if (params.borderSize !== undefined) {
+            style.set("borderSize", params.borderSize);
+            changed.push("borderSize");
+          }
+          if (params.borderStyle !== undefined) {
+            style.set("borderStyle", params.borderStyle);
+            changed.push("borderStyle");
+          }
+          if (params.shadowType !== undefined) {
+            style.set("shadowType", params.shadowType);
+            changed.push("shadowType");
+          }
+        }
+      } else {
+        const noteOnly = ["borderRadius", "borderSize", "borderStyle", "shadowType"] as const;
+        for (const field of noteOnly) {
+          if (params[field as keyof typeof params] !== undefined) ignored.push(field);
+        }
+      }
+
+      if (flavour === "affine:edgeless-text") {
+        if (params.color !== undefined) {
+          block.set("prop:color", params.color);
+          changed.push("color");
+        }
+        if (params.fontFamily !== undefined) {
+          block.set("prop:fontFamily", normalizeSurfaceFontFamily(params.fontFamily, "blocksuite:surface:Inter"));
+          changed.push("fontFamily");
+        }
+        if (params.fontStyle !== undefined) {
+          block.set("prop:fontStyle", params.fontStyle);
+          changed.push("fontStyle");
+        }
+        if (params.fontWeight !== undefined) {
+          block.set("prop:fontWeight", normalizeSurfaceFontWeight(params.fontWeight, "400"));
+          changed.push("fontWeight");
+        }
+        if (params.textAlign !== undefined) {
+          block.set("prop:textAlign", params.textAlign);
+          changed.push("textAlign");
+        }
+      } else {
+        const textOnly = ["color", "fontFamily", "fontStyle", "fontWeight", "textAlign"] as const;
+        for (const field of textOnly) {
+          if (params[field as keyof typeof params] !== undefined) ignored.push(field);
         }
       }
 
@@ -10773,17 +11181,32 @@ export function registerDocTools(
           edgelessBlocks: [],
           surfaceElements: [],
           bounds: null,
-          elementCounts: { shape: 0, connector: 0, text: 0, group: 0 },
+          elementCounts: { shape: 0, connector: 0, text: 0, group: 0, brush: 0 },
         });
       }
       Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
       const blocks = doc.getMap("blocks") as Y.Map<any>;
 
-      const edgelessFlavours = new Set([
+      const edgelessFlavours = new Set<string>([
         "affine:frame",
         "affine:edgeless-text",
         "affine:note",
+        ...CANVAS_EMBED_FLAVOURS,
       ]);
+
+      // Canvas-positioned embed blocks live as children of the surface block
+      // (native AFFiNE layout). Doc-embedded copies (xywh=[0,0,0,0] under a
+      // note) must NOT surface here — filter embed flavours by surface parentage.
+      const surfaceBlockId = findBlockIdByFlavour(blocks, "affine:surface");
+      const surfaceChildIds = new Set<string>();
+      if (surfaceBlockId) {
+        const surfaceBlock = blocks.get(surfaceBlockId);
+        if (surfaceBlock instanceof Y.Map) {
+          for (const c of childIdsFrom(surfaceBlock.get("sys:children"))) {
+            surfaceChildIds.add(c);
+          }
+        }
+      }
 
       const collectNoteText = (rootId: string): string[] => {
         const out: string[] = [];
@@ -10852,6 +11275,7 @@ export function registerDocTools(
         if (!(raw instanceof Y.Map)) continue;
         const flavour = raw.get("sys:flavour");
         if (typeof flavour !== "string" || !edgelessFlavours.has(flavour)) continue;
+        if (CANVAS_EMBED_FLAVOURS.has(flavour) && !surfaceChildIds.has(String(id))) continue;
         const xywhRaw = raw.get("prop:xywh");
         const bounds = parseXywhString(xywhRaw);
         const propIndex = raw.get("prop:index");
@@ -10872,6 +11296,13 @@ export function registerDocTools(
           const lines = collectNoteText(String(id));
           entry.text = lines.length ? lines.join("\n") : null;
           entry.color = raw.get("prop:color") ?? null;
+          entry.fontFamily = raw.get("prop:fontFamily") ?? null;
+          entry.fontStyle = raw.get("prop:fontStyle") ?? null;
+          entry.fontWeight = raw.get("prop:fontWeight") ?? null;
+          entry.textAlign = raw.get("prop:textAlign") ?? null;
+          entry.scale = raw.get("prop:scale") ?? null;
+          entry.rotate = raw.get("prop:rotate") ?? null;
+          entry.hasMaxWidth = raw.get("prop:hasMaxWidth") ?? null;
         } else if (flavour === "affine:note") {
           const lines = collectNoteText(String(id));
           entry.text = lines.length ? lines.join("\n") : null;
@@ -10880,6 +11311,8 @@ export function registerDocTools(
           entry.displayMode = raw.get("prop:displayMode") ?? null;
           const bg = raw.get("prop:background");
           entry.background = bg instanceof Y.Map ? bg.toJSON() : bg ?? null;
+          const edgelessStyle = raw.get("prop:edgeless");
+          entry.edgelessStyle = edgelessStyle instanceof Y.Map ? edgelessStyle.toJSON() : edgelessStyle ?? null;
         }
         edgelessBlocks.push(entry);
       }
@@ -10891,6 +11324,7 @@ export function registerDocTools(
         connector: 0,
         text: 0,
         group: 0,
+        brush: 0,
       };
       if (ctx) {
         for (const [elId, val] of ctx.value.entries()) {
@@ -10937,10 +11371,10 @@ export function registerDocTools(
   };
 
   const surfaceElementFieldSchemas = {
-    x: z.number().optional().describe("X position on canvas (shape/text; default 0)."),
-    y: z.number().optional().describe("Y position on canvas (shape/text; default 0)."),
-    width: z.number().optional().describe("Width (shape default 100, text default 200)."),
-    height: z.number().optional().describe("Height (shape default 100, text default 30)."),
+    x: z.number().optional().describe("X position on canvas (shape/text/brush; default 0)."),
+    y: z.number().optional().describe("Y position on canvas (shape/text/brush; default 0)."),
+    width: z.number().optional().describe("Width (shape default 100, text default 200, brush derived from points)."),
+    height: z.number().optional().describe("Height (shape default 100, text default 30, brush derived from points)."),
     shapeType: z
       .enum(["rect", "ellipse", "diamond", "triangle"])
       .optional()
@@ -10961,7 +11395,13 @@ export function registerDocTools(
       .string()
       .optional()
       .describe("Text content (shape/text) or connector label. Replaces existing Y.Text on update."),
-    color: z.string().optional().describe("Text color. Shape default `#000000` — keep unless the fill is dark, then pass a contrasting hex. Canvas text default `--affine-text-primary-color` (theme-adaptive). Shape/text."),
+    color: z
+      .union([
+        z.string(),
+        z.object({ light: z.string().optional(), dark: z.string().optional() }),
+      ])
+      .optional()
+      .describe("Text color. Shape default `#000000` — keep unless the fill is dark, then pass a contrasting hex. Canvas text default `--affine-text-primary-color` (theme-adaptive). Brush accepts a `{light, dark}` theme-adaptive pair (defaults #000000 / #ffffff). Shape/text/brush."),
     fontSize: z
       .number()
       .optional()
@@ -11004,6 +11444,54 @@ export function registerDocTools(
       .describe(
         "BlockSuite fractional-index string controlling z-order. On add, defaults to a key above every existing element's index (new elements render on top). On update, replaces the stored value — pass a key less than some existing index to send-to-back, or greater to bring-to-front. Use the value returned by list_surface_elements to pick a specific position."
       ),
+    rotate: z.number().optional().describe("Rotation angle in degrees around the element center (default 0). Shape only."),
+    shapeStyle: z
+      .enum(["General", "Scribbled"])
+      .optional()
+      .describe("Shape rendering style (default General). 'Scribbled' enables the rough.js hand-drawn look via `roughness`. Shape only."),
+    roughness: z.number().optional().describe("Rough.js roughness factor (default 1.4); only visible with shapeStyle='Scribbled'. Shape only."),
+    shadow: z
+      .object({
+        offsetX: z.number().optional(),
+        offsetY: z.number().optional(),
+        blur: z.number().optional(),
+        color: z.string().optional(),
+      })
+      .nullable()
+      .optional()
+      .describe("Drop shadow (default null = none). Pass {offsetX, offsetY, blur, color} or null. Shape only."),
+    padding: z
+      .array(z.number())
+      .length(2)
+      .optional()
+      .describe("Text padding [vertical, horizontal] inside the shape (default [10, 20]). Shape only."),
+    fontFamily: z.string().optional().describe("Text font family. Accepts a friendly name ('Inter', 'Poppins') or the full 'blocksuite:surface:Inter' form (default Inter). Shape only."),
+    fontStyle: z.enum(["normal", "italic"]).optional().describe("Text font style (default normal). Shape only."),
+    textAlign: z.enum(["left", "center", "right"]).optional().describe("Text horizontal alignment (default center). Shape only."),
+    rough: z.boolean().optional().describe("Connector rough.js hand-drawn style (default false; true = Scribbled). Connector only."),
+    labelOffset: z
+      .object({
+        distance: z.number().optional().describe("Position of the label along the connector path, 0=source end, 1=target end (default 0.5)."),
+        anchor: z.enum(["center", "left", "right"]).optional().describe("Anchor of the label relative to the connector path (default center)."),
+      })
+      .optional()
+      .describe("Connector label position along the line. Connector only."),
+    labelStyle: z
+      .object({
+        color: z.string().optional().describe("Label text color (default '--affine-text-primary-color' — theme-adaptive)."),
+        fontFamily: z.string().optional().describe("Label font family (friendly name or full form, default Inter)."),
+        fontSize: z.number().optional().describe("Label font size (default 16)."),
+        fontStyle: z.enum(["normal", "italic"]).optional().describe("Label font style (default normal)."),
+        fontWeight: z.string().optional().describe("Label font weight (default 400; accepts 'regular'/'medium'/'bold' aliases)."),
+        textAlign: z.enum(["left", "center", "right"]).optional().describe("Label text alignment (default center)."),
+      })
+      .optional()
+      .describe("Connector label text styling. Connector only."),
+    points: z
+      .array(z.array(z.number()))
+      .optional()
+      .describe("Brush stroke points as [x, y, pressure] triples, local to the stroke's own box (x/y place the box on the canvas). The server derives the xywh bounding box from these. Brush only."),
+    lineWidth: z.number().optional().describe("Brush stroke line width (default 4). Brush only."),
   } as const;
 
   server.registerTool(
@@ -11015,7 +11503,7 @@ export function registerDocTools(
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
-        type: z.enum(["shape", "connector", "text", "group"]).describe("Element type"),
+        type: z.enum(["shape", "connector", "text", "group", "brush"]).describe("Element type"),
         ...surfaceElementFieldSchemas,
       },
     },
@@ -11032,7 +11520,7 @@ export function registerDocTools(
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
         type: z
-          .enum(["shape", "connector", "text", "group"])
+          .enum(["shape", "connector", "text", "group", "brush"])
           .optional()
           .describe("Filter by element type"),
         elementId: z.string().optional().describe("Filter to a single element id"),
@@ -11112,7 +11600,7 @@ export function registerDocTools(
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         docId: DocId.describe("Document ID"),
-        blockId: z.string().min(1).describe("Block id (flavour affine:note/affine:frame/affine:edgeless-text)."),
+        blockId: z.string().min(1).describe("Block id (flavour affine:note/affine:frame/affine:edgeless-text, or a canvas-positioned image/attachment/bookmark/embed block)."),
         x: z.number().optional(),
         y: z.number().optional(),
         width: z.number().optional(),
@@ -11124,6 +11612,25 @@ export function registerDocTools(
           ])
           .optional()
           .describe("Note/frame only. Prefer `--affine-note-background-<color>` or `{light, dark}` hex."),
+        displayMode: z
+          .enum(["page", "edgeless", "both"])
+          .optional()
+          .describe("Note only. Where the note renders: 'page' = page mode only, 'edgeless' = edgeless only, 'both' = everywhere (default both)."),
+        borderRadius: z.number().int().optional().describe("Note only. Corner radius (px) of the note card (default 8)."),
+        borderSize: z.number().int().optional().describe("Note only. Border thickness (px) of the note card (default 1)."),
+        borderStyle: z.enum(["solid", "dash", "none"]).optional().describe("Note only. Border style of the note card (default solid)."),
+        shadowType: z.string().optional().describe("Note only. Shadow style token, e.g. 'none' or '--affine-note-shadow-sticker' (default none)."),
+        color: z
+          .union([
+            z.string(),
+            z.object({ light: z.string().optional(), dark: z.string().optional() }),
+          ])
+          .optional()
+          .describe("Edgeless-text only. Text color — theme token, hex, or `{light, dark}` pair."),
+        fontFamily: z.string().optional().describe("Edgeless-text only. Font family (friendly name like 'Inter'/'Poppins' or full 'blocksuite:surface:Inter' form)."),
+        fontStyle: z.enum(["normal", "italic"]).optional().describe("Edgeless-text only. Font style (default normal)."),
+        fontWeight: z.string().optional().describe("Edgeless-text only. Font weight (default 400; accepts 'regular'/'medium'/'bold' aliases)."),
+        textAlign: z.enum(["left", "center", "right"]).optional().describe("Edgeless-text only. Text alignment (default left)."),
       },
     },
     updateEdgelessBlockHandler as any
