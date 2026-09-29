@@ -583,7 +583,7 @@ export function registerWorkspaceExportTools(
     {
       title: "Export Workspace",
       description:
-        "Export an entire AFFiNE workspace as a .affine backup file (nbstore v1 SQLite: all documents' Yjs state in 'updates' + attachments in 'blobs'). Downloads every document via the workspace REST API, scans for blob references, downloads attachments, and writes a database that AFFiNE desktop can import as a new local workspace. Does not modify any workspace data.",
+        "Export an entire AFFiNE workspace as a .affine backup file (nbstore v2 SQLite: all documents' Yjs state plus attachments). Downloads every document via the workspace REST API, scans for blob references, downloads attachments, and writes a database that AFFiNE desktop can import as a new local workspace. Does not modify any workspace data.",
       inputSchema: {
         workspaceId: z.string().optional().describe("Workspace ID (optional if default set)"),
         outputPath: z
