@@ -98,7 +98,7 @@ assert.throws(
   /AFFINE_TEST_RUN_ID must be 8-96 characters/,
 );
 
-const mutationPattern = /\b(create_workspace|delete_workspace|create_doc|delete_doc|append_block|update_profile|ensureAdminUser)\b/;
+const mutationPattern = /\b(create_workspace|delete_workspace|create_doc|delete_doc|append_block|update_profile|ensureAdminUser|updateAppConfig)\b/;
 const staticOnlyFiles = new Set(['test-tool-filtering.mjs', 'test-oauth-service-policy.mjs']);
 const liveTestFiles = fs.readdirSync(testDirectory)
   .filter(name => name.endsWith('.mjs'))
@@ -129,6 +129,19 @@ for (const runner of ['run-e2e.sh', 'run-comprehensive.sh']) {
   assert.ok(composePosition > guardPosition, `${runner} must guard before Docker cleanup`);
 }
 
+const unsafeConfiguration = spawnSync(process.execPath, ['tests/configure-test-instance.mjs'], {
+  cwd: repositoryRoot,
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    AFFINE_BASE_URL: remoteTarget,
+    AFFINE_ALLOW_REMOTE_DESTRUCTIVE_TESTS: '',
+    AFFINE_REMOTE_DESTRUCTIVE_TEST_CONFIRM: '',
+  },
+});
+assert.notEqual(unsafeConfiguration.status, 0, 'remote instance configuration must fail closed');
+assert.match(unsafeConfiguration.stderr, /Refusing destructive tests against non-loopback target/);
+
 const generatedEnv = spawnSync(
   'bash',
   ['-c', '. tests/generate-test-env.sh >/dev/null; printf "%s" "$AFFINE_TEST_ENV_FILE"'],
@@ -153,6 +166,33 @@ try {
   assert.match(contents, /DB_PASSWORD="db\\"pass\\\\word\$\$VALUE\$\$\{OTHER\}\$\$\$\$end"/);
 } finally {
   fs.rmSync(generatedEnvPath, { force: true });
+}
+
+// Exercise the actual shell retry function without Docker or a live AFFiNE target.
+const e2eRunner = fs.readFileSync(path.join(testDirectory, 'run-e2e.sh'), 'utf8');
+const retryStart = e2eRunner.indexOf('acquire_credentials_with_retry() {');
+assert.ok(retryStart >= 0, 'credential retry function must exist');
+const retryEnd = e2eRunner.indexOf('\n}', retryStart);
+assert.ok(retryEnd > retryStart, 'credential retry function must be complete');
+const retryFunction = e2eRunner.slice(retryStart, retryEnd + 2);
+for (const recover of [false, true]) {
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+AFFINE_CREDENTIAL_ACQUIRE_RETRIES=2
+AFFINE_CREDENTIAL_RETRY_DELAY_SECONDS=0
+SCRIPT_DIR=unused
+attempt_count=0
+node() {
+  attempt_count=$((attempt_count + 1))
+  if [[ ${recover ? '1' : '0'} == 1 && "$attempt_count" == 2 ]]; then return 0; fi
+  return 42
+}
+docker_diagnostics() { :; }
+sleep() { :; }
+${retryFunction}
+acquire_credentials_with_retry
+`], { encoding: 'utf8' });
+  assert.equal(result.status, recover ? 0 : 42, result.stderr || result.stdout);
 }
 
 console.log('Live destructive-test safety checks passed');

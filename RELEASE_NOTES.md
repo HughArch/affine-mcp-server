@@ -1,5 +1,417 @@
 # Release Notes
 
+## Version 3.8.4 (2026-09-29)
+
+### Highlights
+- Show the authenticated creator for new MCP-created pages in AFFiNE.
+- Keep custom properties and comments visible and editable in the native AFFiNE UI.
+- Prevent empty Markdown notes after rejected content and report missing page metadata explicitly.
+
+### What Changed
+- Record creators for pages, workspace welcome pages, and template instances without overwriting existing attribution. Reconcile incomplete creator writes before returning success.
+- Store custom-property definitions and values in AFFiNE's workspace-scoped documents; preserve the creator stored alongside property values.
+- Convert strings and legacy `{ text: string }` comments into native BlockSuite snapshots. Preserve rich snapshot content and reject malformed snapshots, including non-page roots, before mutation.
+- Save a Markdown note and its children in one page update, so invalid child content cannot leave an empty note behind.
+- Return non-retryable `workspace_page_updated_date_failed` when page content was saved but the workspace page metadata entry is missing.
+- Add native UI coverage for all four property types and comment creation, editing, and deletion, plus integration coverage for supporting tools and partial-write regressions.
+
+### Compatibility
+- The canonical MCP surface remains at 106 tools. No configuration migration is required.
+- Existing pages are not backfilled with creator attribution. Existing creator values are preserved.
+- Older custom-property data is recoverable through `list_doc_properties` with `includeLegacy: true`, in a separate `legacy` result. Nothing is automatically imported or overwritten. Recreate affected definitions with `create_custom_property`, then use the new property IDs with `set_doc_property` to restore recovered values.
+- Legacy comments already stored without a native snapshot are not rewritten automatically. Update their content through `update_comment` to make them renderable.
+- After a partial-write error, inspect the existing document and repair its metadata instead of replaying the content edit.
+- Node.js 20.18.1 or newer remains required; release validation targets AFFiNE 0.27.4.
+- Upgrade the npm package or use `ghcr.io/dawncr0w/affine-mcp-server:3.8.4`, then restart the MCP server.
+
+## Version 3.8.3 (2026-09-28)
+
+### Highlights
+- Keep AFFiNE's Updated lists and sorting current after MCP page creation and editing.
+- Write native page-reference chips without accepting malformed visible-label deltas.
+- Read and write named, colored sidebar icons in AFFiNE's native format.
+
+### What Changed
+- Initialize workspace page modification dates on creation and advance them after acknowledged page-content writes. Internal workspace subdocuments retain their existing write behavior.
+- Validate LinkedPage deltas across blocks, table cells, and database cells. Generated links use AFFiNE's ASCII-space marker, and legacy zero-width markers normalize when written.
+- Preserve reference-only Markdown content, references at text boundaries, and consecutive references during import and export.
+- Accept AFFiNE's `affine-icon` shape and optional CSS color for document and folder icons while keeping legacy `icon` inputs readable.
+- Include occupied, established, and initializing HTTP session counts in capacity errors, with documented session limits and recovery guidance.
+- Update development dependencies `tsx` to 4.23.15 and Node.js type definitions to 24.13.6.
+
+### Compatibility
+- The canonical MCP surface remains at 106 tools. Existing tool names and required inputs remain available.
+- Malformed LinkedPage deltas with visible labels or missing page IDs now fail before saving. Existing stored documents remain readable; no bulk data migration is performed.
+- A saved page whose modification timestamp cannot be confirmed reports non-retryable `workspace_page_updated_date_failed`. Inspect the existing document and repair metadata instead of repeating the content edit.
+- Node.js 20.18.1 or newer remains required; release validation targets AFFiNE 0.27.4.
+- Upgrade the npm package or use `ghcr.io/dawncr0w/affine-mcp-server:3.8.3`, then restart the MCP server. No configuration migration is required.
+
+## Version 3.8.2 (2026-09-22)
+
+### Highlights
+- Restore AFFiNE version history for documents created or modified by `affine-mcp-server`.
+
+### What Changed
+- Keep newly created page documents limited to AFFiNE's canonical `blocks` shared type so version-history restore can apply older versions.
+- Read legacy page metadata without recreating the non-canonical top-level map.
+- Use workspace title and tags as the canonical source for collection rules, preventing stale legacy metadata from overriding title matches or resurrecting removed tags.
+
+### Compatibility
+- Existing tools and required inputs and output contracts remain unchanged; the canonical MCP surface remains at 106 tools.
+- Existing documents remain readable, and no configuration migration is required.
+- Node.js 20.18.1 or newer remains required; release validation targets AFFiNE 0.27.4.
+- Upgrade the npm package or use `ghcr.io/dawncr0w/affine-mcp-server:3.8.2`, then restart the MCP server.
+
+## Version 3.8.1 (2026-09-21)
+
+### Highlights
+- Fix memory growth in long-running HTTP servers when clients repeatedly create MCP sessions (issue #357; PR #358).
+- Create Markdown documents directly in organize folders while preserving their native block structure.
+
+### What Changed
+- Reuse tool output schemas across sessions so Zod metadata no longer retains a new validation graph on every connection. Existing session limits, idle expiry, and output validation remain unchanged.
+- Accept case-insensitive JSON and GraphQL response media types.
+- Support folder placement in `create_doc_from_markdown` and warn when structured Markdown is passed to the plain-text `create_doc.content` field, including table-only Markdown.
+- Keep Markdown warning detection bounded for malformed or escaped link syntax.
+- Update `markdown-it` to 14.3.2 and development Node.js type definitions to 24.13.4.
+- Add HTTP memory regression coverage for explicit session termination and idle expiry, alongside the existing live integration and browser checks.
+
+### Compatibility
+- The canonical MCP surface remains at 106 tools. No existing required inputs or output contracts changed.
+- Node.js 20.18.1 or newer remains required; release validation targets AFFiNE 0.27.4.
+- Upgrade the npm package or use `ghcr.io/dawncr0w/affine-mcp-server:3.8.1`, then restart the MCP server. No configuration migration is required.
+
+## Version 3.8.0 (2026-09-14)
+
+### Highlights
+- Added per-workspace write coordination in one server process, with a FIFO queue of up to 100 waiting calls and a 60-second start deadline.
+- Added optional document revisions for stale-edit checks and native table column sizing, raising the canonical MCP tool surface from 105 to 106 tools.
+- Expanded CLI onboarding with workspace discovery and selection, generated snippets, actionable recovery, and `doctor` diagnostics.
+
+### What Changed
+- `read_doc` returns a content `revision`; document content mutations can pass `expectedRevision` to reject stale edits before mutation. The check is process-local and is not distributed compare-and-swap.
+- Added reversible, content-preserving `update_table_column_widths` support with `read_doc.tableColumnWidths` readback.
+- Login now honors plain-HTTP opt-in, uses complete AFFiNE Cloud hostname matching, preserves header-only authentication and saved non-authentication headers during relogin, and optionally saves email/password credentials for renewal.
+- Structured error envelopes, `search_docs` pagination state, and supported-versus-effective capability reporting make recovery and tool exposure explicit.
+- Workspace selection accepts equivalent normalized deployment URLs, and HTTP authentication, permission, rate-limit, and server failures keep their recovery codes even when the upstream returns HTML or plain text.
+- Updated locked `jose` to 6.2.12, `undici` to 7.29.1, and Playwright to 1.63.0; raised the minimum `zod` version to 3.25.76.
+
+### Compatibility
+- Existing tools and required inputs remain available; the canonical MCP surface is now 106 tools.
+- Node.js 20.18.1 or newer remains required, and release behavior targets AFFiNE 0.27.4.
+- All coordinated writers for a workspace must share one HTTP server process. Separate processes or replicas do not share the queue, and revisions do not provide distributed CAS.
+- `login --save-credentials` is opt-in and stores the password unencrypted in the owner-only mode-600 config file. Generated snippets with `--env` may contain secrets.
+- Remote plain HTTP still requires explicit opt-in.
+
+## Version 3.7.0 (2026-09-10)
+
+### Highlights
+- Added an opt-in `affine-mcp-http-proxy` command for local stdio clients that share an existing HTTP server.
+- Improved session recovery and managed authentication renewal for long-running clients.
+
+### What Changed
+- The bridge forwards one stdio session to a loopback `/mcp` listener, uses the host's `AFFINE_MCP_HTTP_TOKEN`, and deletes its HTTP session on EOF.
+- Explicitly expired MCP sessions can be recreated before a rejected request is replayed. Network failures, timeouts, ordinary HTTP 404 responses, and failed reinitialization never trigger automatic write replay.
+- Concurrent email/password logins share one attempt. Failed logins can retry after five seconds, and managed cookies renew before expiry, with a twelve-hour fallback when no expiry is supplied.
+- Native stdio processes close on EOF. Proxy shutdown and response reads are bounded, and malformed input receives a JSON-RPC error without preventing later requests.
+- Failed initialized notifications clear the restored session ID before another request can use it. Already expired login cookies retain their deadlines, while unrelated cleared cookies do not force premature renewal.
+- Updated the locked Hono dependency to 4.13.7 to address reported security advisories.
+- Added packed-proxy and real-listener coverage alongside authentication and session recovery regressions.
+
+### Compatibility
+- The canonical MCP surface remains at 105 tools. No tool names or existing required inputs changed.
+- The bridge is opt-in and requires a loopback HTTP listener and an inherited `AFFINE_MCP_HTTP_TOKEN`. See the private stdio bridge section in the deployment guide.
+- Default loopback HTTP assumes a trusted host or container. Use isolation or authenticated TLS when untrusted local processes can replace the listener; loopback alone does not authenticate the server.
+- Explicit cookies and bearer tokens remain caller-managed. Automatic renewal applies only to sessions established with email/password.
+- Node.js 20.18.1 or newer remains required. Release validation targets AFFiNE 0.27.4.
+
+## Version 3.6.0 (2026-09-08)
+
+### Highlights
+- Added eight native mindmap tools to create and edit hierarchies, move subtrees, choose right/left/balance layouts, switch all four native styles, and lock or unlock maps.
+- Hardened authentication recovery, document creation, pagination, and collection updates against transient failures and invalid input.
+
+### What Changed
+- Native mindmaps preserve node IDs and descendants during moves, reject invalid topology and locked edits, and expose read-only discovery through `get_mindmap`.
+- OAuth discovery retries after transient failures and applies a bounded request deadline. CLI diagnostics and the server now resolve bearer and cookie credentials consistently, including credentials supplied through additional headers.
+- Document creation reuses stable IDs and reports partial or uncertain persistence with recovery guidance. Deleted document entries no longer prevent pagination from progressing.
+- Collection rules are validated before mutation; shared collection updates preserve unrelated metadata.
+- Full-note Markdown replacement is classified as destructive. Incremental editing remains available in restricted profiles.
+- Expanded regression and live comprehensive coverage, including all eight native mindmap operations and E2E credential acquisition failures.
+
+### Compatibility
+- Eight tools were added, bringing the canonical MCP surface from 97 to 105 tools. No tool names or existing required inputs were removed.
+- `replace_doc_with_markdown` is excluded from `core`, `authoring`, and destructive-disabled deployments. Use `full` with destructive tools enabled when full-note replacement is intended.
+- Native mindmaps support shape nodes, up to 500 nodes and depth 64. Node deletion, cross-map transfer, and `up`/`down` layouts are not exposed. Perform hierarchy mutations sequentially and read them back; concurrent writers have no compare-and-swap guarantee.
+- Mindmap locking is an editor lock, not an access-control boundary. The optional pinned 3.2.1 compatibility overlay is separate from this package release.
+- Node.js 20.18.1 or newer remains required. Local release validation targets AFFiNE 0.27.4.
+
+## Version 3.5.1 (2026-09-07)
+
+### Highlights
+- `append_block` now warns when a table is created without cell content and explains how to fill it with `tableData`, `tableCellDeltas`, or `update_table_cell`.
+- Intentional empty-table creation continues to succeed, and tables supplied with cell content do not receive this warning.
+
+### What Changed
+- Updated locked `fast-uri` to 3.1.7 and `qs` to 6.16.0 to address reported security advisories.
+- Returned the empty-table warning to callers and added integration coverage for creating an empty table and filling a cell afterwards.
+- Updated locked `markdown-it` to 14.3.1, `@types/markdown-it` to 14.2.0, and `tsx` to 4.23.13.
+
+### Compatibility
+- The canonical MCP surface remains at 97 tools; existing required inputs and successful empty-table creation remain compatible.
+- Node.js 20.18.1 or newer remains required.
+
+### Validation Evidence
+- Node.js 26.5.1: `npm run ci` passed (28 fast tests, 97-tool metadata, documentation, and package checks).
+- `npm audit --audit-level=low` reported zero vulnerabilities.
+- `AFFINE_REVISION=0.27.4 PLAYWRIGHT_BROWSER_CHANNEL=chrome npm run test:e2e` passed (24 integration tests and 17 Chrome browser tests).
+- Linux/amd64 Docker build and runtime smoke passed: version 3.5.1, non-root UID 100, and healthy protected HTTP mode.
+
+## Version 3.5.0 (2026-08-31)
+
+### Highlights
+- AFFiNE tables can now be created with cell content through `append_block` and edited one cell at a time through the new `update_table_cell` tool.
+- Direct rich-text cell updates preserve inline attributes, header bold formatting, literal pipes, and dotted code text without rebuilding the table through Markdown.
+- `read_doc` now exposes complete table text and delta matrices for lossless read-modify-write flows.
+
+### What Changed
+- Declared `tableData` and `tableCellDeltas` on the public `append_block` schema and added dimension checks for both matrices.
+- Added zero-based row and column addressing for cell updates, including bounds, block-flavour, no-op, and missing-block safeguards.
+- Preserved arbitrary rich-text delta attributes and enforced AFFiNE header-row bold formatting during direct cell writes.
+- Added exact table matrices to `read_doc` block rows and kept Markdown export compatible with links, inline code, and escaped pipes.
+- Added CRDT, contract, profile, Markdown, and Chromium coverage for table creation and cell editing.
+- Refreshed `jose` from 6.2.9 to 6.2.10 and strengthened the container startup smoke gate.
+
+### Compatibility
+- One tool was added, bringing the canonical MCP surface from 96 to 97 tools; no tools or existing required inputs were removed.
+- Existing plain-string table content remains supported, and rich-text delta arrays are additive.
+- Node.js 20.18.1 or newer remains required.
+- Release behavior is validated against AFFiNE 0.27.4.
+
+### Validation Evidence
+- Node.js 26.5.1: clean `npm ci && npm run ci` (28 fast tests; 97-tool metadata, documentation, and package checks)
+- `npm audit --audit-level=low` with zero vulnerabilities
+- `AFFINE_REVISION=0.27.4 npm run test:comprehensive` (16 focused integrations; 112/112 comprehensive checks)
+- `AFFINE_REVISION=0.27.4 npm run test:e2e` (24 integration tests; 17 Playwright tests)
+- Packed-tarball install, CLI, and 97-tool discovery smoke
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build, version check, non-root UID check, protected health endpoint, and authenticated startup smoke
+
+## Version 3.4.1 (2026-08-27)
+
+### Highlights
+- Strict divider validation now evaluates the same canonical rich-text content that block creation would use, preventing non-empty internal delta content from being silently discarded.
+- The published container now starts correctly with the documented argument-free `docker run` command and required bearer token, and is covered by a real healthcheck smoke test.
+
+### What Changed
+- Removed the redundant internal delta input alongside `AppendBlockInput.text`.
+- Markdown operations now pass formatting-preserving deltas through the canonical text input whenever deltas are available.
+- Existing rich-text import and divider validation paths cover the unified contract without adding a second public input.
+- Reset the Node base image command so the MCP HTTP server starts by default, while preserving explicit CLI commands such as `--version`.
+- Extended Docker PR validation from build, version, and UID checks to an authenticated, healthy default-start container check.
+
+### Compatibility
+- The canonical MCP surface remains at 96 tools; no public input or output contract changed.
+- Plain-string and formatting-preserving delta inputs remain supported through `append_block.text` and `update_block.text`.
+- Node.js 20.18.1 or newer remains required.
+- Release behavior is validated against AFFiNE 0.27.4.
+
+### Validation Evidence
+- Node.js 20.20.2, 22.23.2, 24.20.0, and 26.7.0: clean `npm ci && npm run ci`
+- `npm audit --audit-level=low` with zero vulnerabilities
+- `AFFINE_REVISION=0.27.4 npm run test:comprehensive` (16 focused integrations; 111/111 comprehensive checks)
+- `AFFINE_REVISION=0.27.4 npm run test:e2e` (24 integration tests; 17 Playwright tests)
+- Isolated database UI row integration coverage
+- Packed-tarball install, CLI, and 96-tool discovery smoke on Node.js 20 and 26
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build, version check, non-root UID check, and healthcheck smoke
+
+## Version 3.4.0 (2026-08-27)
+
+### Highlights
+- Block creation and editing now preserve arbitrary AFFiNE inline text attributes, including colors and highlights, through a lossless delta input and output path.
+- Upstream HTTP response handling now enforces a 16 MiB body limit and keeps request deadlines active until each body is fully consumed.
+- Empty workspace and profile updates fail before mutation, while ignored-only surface updates avoid unnecessary CRDT pushes.
+- CI now validates every supported even-numbered Node.js release from 20 through 26.
+
+### What Changed
+- Formatting-preserving block text
+  - `append_block.text` and `update_block.text` accept either a plain string or a delta array with arbitrary inline attributes.
+  - `read_doc` and block-editing receipts return canonical `deltas` alongside flattened `text`.
+  - Empty delta content is normalized consistently when validating divider blocks.
+  - String inputs and existing response fields remain compatible.
+- HTTP response safety
+  - GraphQL, authentication, readiness, CLI, blob-upload, and workspace-creation paths share one bounded response reader.
+  - Slow or oversized response bodies fail predictably instead of bypassing the request deadline or consuming unbounded memory.
+  - Diagnostic response bodies are cancelled when their content is not needed.
+- Mutation handling
+  - `update_workspace` and `update_profile` require at least one meaningful field.
+  - Surface and edgeless updates that contain only ignored elements do not send unchanged Yjs state.
+  - AFFiNE document and workspace identifiers use the shared cryptographically secure generator.
+- Runtime validation
+  - CI covers Node.js 20, 22, 24, and 26.
+  - Node.js type definitions are aligned with the minimum supported runtime.
+
+### Compatibility
+- The canonical MCP surface remains at 96 tools; no tools or existing required inputs were removed.
+- Plain-string block text remains supported, and delta arrays are an additive input and output path.
+- Node.js 20.18.1 or newer remains required.
+- Release behavior is validated against AFFiNE 0.27.4.
+
+### Validation Evidence
+- Node.js 20.20.2, 22.23.2, 24.20.0, and 26.7.0: clean `npm ci && npm run ci`
+- `npm audit --audit-level=low` with zero vulnerabilities
+- `AFFINE_REVISION=0.27.4 npm run test:comprehensive` (16 focused integrations; 111/111 comprehensive checks)
+- `AFFINE_REVISION=0.27.4 npm run test:e2e` (24 integration tests; 17 Playwright tests)
+- Isolated database UI row integration coverage
+- Packed-tarball install, CLI, and 96-tool discovery smoke on Node.js 20 and 26
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build, version check, non-root UID check, and healthcheck smoke
+
+## Version 3.3.0 (2026-08-24)
+
+### Highlights
+- Added recoverable document trash and restore operations that preserve content and verify the resulting AFFiNE workspace metadata.
+- Added block-level update and move operations that retain block IDs while editing, converting, reordering, or reparenting supported text blocks.
+- Added database title-column support and strengthened rich-text cell handling across AFFiNE's stored database view representations.
+- Improved HTTP session errors, Markdown output fidelity, and import-loss reporting.
+
+### What Changed
+- Document lifecycle
+  - Added idempotent `trash_doc` and `restore_doc` tools with retry classification and read-back verification.
+  - Keeps permanent `delete_doc` separate for callers that explicitly require irreversible deletion.
+- Block editing
+  - Added `update_block` for partial text, todo-state, list-style, and compatible text-block type updates.
+  - Added `move_block` for same-parent reordering and cross-parent moves with root and cycle protection.
+  - `read_doc` now includes hierarchy-derived `parentId` values, and `delete_block` returns reconstructable deleted-block snapshots.
+- Database compatibility
+  - Added `title` to the supported database column types and rejects attempts to create a second title column.
+  - Synchronizes column mutations across Y.Map, Y.Array, and legacy stored view representations.
+  - Preserves valid rich-text Yjs deltas in cell reads and updates and rejects malformed delta payloads before mutation.
+- Runtime and Markdown behavior
+  - Unknown HTTP session IDs return an explicit `404 Session not found` response.
+  - Markdown output preserves ordinary punctuation, ampersands, and unknown entity-like text without unnecessary escaping.
+  - Fidelity analysis reports known Markdown import losses separately from export behavior.
+- Dependencies
+  - Refreshed the locked `jose` release from 6.2.8 to 6.2.9.
+
+### Compatibility
+- Four tools were added, bringing the canonical MCP surface from 92 to 96 tools; no tools were removed.
+- No existing required inputs were changed, and existing text and structured result paths remain available.
+- Node.js 20.18.1 or newer remains required.
+- Release behavior is validated against AFFiNE 0.27.4.
+
+### Validation Evidence
+- Node.js 20.18.1 and 24: clean `npm run ci`
+- `npm audit --audit-level=low`
+- `AFFINE_REVISION=0.27.4 npm run test:comprehensive`
+- `AFFINE_REVISION=0.27.4 npm run test:e2e`
+- Packed-tarball install, CLI, and 96-tool discovery smoke
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build, version check, non-root UID check, and healthcheck smoke
+
+## Version 3.2.2 (2026-08-18)
+
+### Highlights
+- Tool discovery now works with clients that accept JSON Schema 2020-12 but reject schemas declaring the draft-07 dialect.
+- Container health checks now use IPv4 loopback, avoiding false unhealthy states when `localhost` resolves to IPv6.
+- Runtime, development, browser-test, and container-publish dependencies were refreshed.
+
+### What Changed
+- MCP schema compatibility
+  - Removes the SDK-injected draft-07 `$schema` marker from advertised input and output schemas.
+  - Preserves the existing tool names, parameters, output structures, and 92-tool canonical surface.
+  - Fails closed at startup if an incompatible MCP SDK change prevents schema normalization.
+- Container reliability
+  - Probes `127.0.0.1` in the Docker `HEALTHCHECK`, matching the server's IPv4 listener.
+- Dependencies
+  - Raised `undici` from `^6.28.0` to `^7.29.0`.
+  - Refreshed locked `jose`, `yjs`, Node.js types, `tsx`, and Playwright releases.
+  - Updated the Docker login action from `4.5.2` to `4.6.0`.
+
+### Compatibility
+- No tools were added or removed, and no existing input or output contract changed.
+- Node.js 20.18.1 or newer is required.
+- Docker deployments keep the same HTTP port and health endpoint.
+
+### Validation Evidence
+- Node.js 20.18.1 and 24.19.0: clean `npm ci && npm run ci` (27/27 fast tests on each runtime)
+- `npm audit --audit-level=low` (zero vulnerabilities)
+- Node.js 20.18.1: `npm run test:e2e` (21/21 integration tests; 14/14 Playwright tests)
+- Packed-tarball install, CLI, and 92-tool discovery smoke
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build, version check, non-root UID check, and IPv4 healthcheck smoke
+
+## Version 3.2.1 (2026-08-06)
+
+### Highlights
+- Scripted session-cookie login now reads secrets from stdin instead of exposing them in shell history or process listings.
+- Explicit workspace selections are verified against the authenticated account before the CLI saves them.
+- Ordinary workspace members can paginate documents even when AFFiNE denies access to the primary GraphQL document connection.
+
+### Security Migration
+- `affine-mcp login --cookie <value>` is no longer accepted. Automation must pass the cookie through `--cookie-stdin` instead.
+- Existing saved cookie configurations and interactive login remain compatible; only command-line cookie ingestion changed.
+- Piped cookie input requires `--force` when it replaces existing credentials, preventing an overwrite prompt from consuming the secret.
+
+### What Changed
+- CLI authentication
+  - Added `--cookie-stdin` for hidden or piped session-cookie input.
+  - Rejects legacy `--cookie` and `--cookie=<value>` arguments without echoing their values.
+  - Validates `--workspace-id` for cookie, compatible-token, and email/password login paths.
+- Document discovery
+  - Falls back to bounded workspace metadata pagination when ordinary members cannot query the primary document connection.
+  - Preserves workspace-scoped cursors, pagination bounds, and acknowledged-deletion filtering in fallback results.
+- Regression coverage
+  - Covers legacy-cookie redaction, non-TTY stdin isolation, overwrite protection, inaccessible workspace rejection, and deletion-aware fallback pagination.
+
+### Compatibility
+- The canonical MCP tool surface remains at 92 tools with no input or output contract removals.
+- Scripts that passed a cookie in `--cookie` must migrate to `--cookie-stdin`.
+- Existing saved credentials, interactive login, and Node.js 20-or-newer support remain unchanged.
+
+### Validation Evidence
+- Node.js 20 and 24: clean `npm ci && npm run ci`
+- `npm audit --audit-level=low` (zero vulnerabilities)
+- `AFFINE_REVISION=0.27.3 npm run test:comprehensive` (15/15 focused tests; 107/107 regression checks)
+- `AFFINE_REVISION=0.27.3 npm run test:e2e` (21/21 integration tests; 14/14 Playwright tests)
+- Packed-tarball smoke on Node.js 20 and 24
+- `npm publish --dry-run --access public --ignore-scripts`
+- Linux/amd64 Docker build and non-root runtime smoke
+
+## Version 3.2.0 (2026-08-04)
+
+### Highlights
+- All 92 canonical tools now declare MCP output schemas, allowing ChatGPT and other clients to validate structured results and plan safer follow-up calls.
+- Runtime dependency minimums and transitive locks were refreshed to clear the current security advisories.
+- Release validation now exercises document publish and revoke deterministically against AFFiNE 0.27.3 without waiting for the upstream new-account sharing delay.
+
+### What Changed
+- Structured MCP results
+  - Added object-shaped `outputSchema` metadata to every canonical tool.
+  - Aligned document, frame, list, and fallible receipt schemas with actual runtime results.
+  - Added metadata, round-trip, and success/failure contract coverage.
+- Dependencies and security
+  - Raised `@modelcontextprotocol/sdk` to `^1.30.0` and `undici` to `^6.28.0`.
+  - Refreshed locked `@hono/node-server`, `fast-uri`, `hono`, `ip-address`, and `socket.io-parser` versions.
+  - `npm audit --audit-level=low` reports zero vulnerabilities.
+- Release validation
+  - Configures only the isolated comprehensive-test AFFiNE instance with a zero new-account share delay.
+  - Adds 30-second bounds to the isolated sign-in and GraphQL configuration requests.
+
+### Compatibility
+- No tools were removed and no existing input is required to change.
+- Node.js 20 or newer remains required.
+- Text content remains available alongside the structured result contracts.
+
+### Validation Evidence
+- Node.js 20 and 24: `npm ci && npm run ci`
+- `npm audit --audit-level=low`
+- `AFFINE_REVISION=0.27.3 npm run test:comprehensive` (15/15 focused tests; 107/107 regression checks)
+- `AFFINE_REVISION=0.27.3 npm run test:e2e` (21/21 integration tests; 14/14 Playwright tests)
+- Packed-tarball smoke on Node.js 20 and 24
+- `npm publish --dry-run --access public --ignore-scripts`
+
 ## Version 3.1.0 (2026-07-27)
 
 ### Highlights

@@ -7,6 +7,7 @@ import { testResourceName, testTempPath } from './require-destructive-test-safet
  * Covers:
  * - list_docs should return titles from workspace metadata when GraphQL omits them
  * - search_docs should support exact/prefix matching, tag filtering, and updatedAt sorting
+ * - trash_doc and restore_doc should preserve content and update discovery metadata
  * - list_docs should correct stale count metadata after delete_doc removes a document
  */
 import path from "node:path";
@@ -145,6 +146,37 @@ async function main() {
 
     const expectedTitlesAfterCreate = ["Workspace Home", ...createdDocs.map(doc => doc.title)];
 
+    const trashed = await call("trash_doc", {
+      workspaceId: workspace.id,
+      docId: createdDocs[1].docId,
+    });
+    expectEqual(trashed?.status, "trashed", "trash_doc status");
+    expectEqual(trashed?.inTrash, true, "trash_doc inTrash");
+    expectEqual(trashed?.readBackVerified, true, "trash_doc readBackVerified");
+    await waitForListDocs(
+      workspace.id,
+      result => result?.edges?.some(edge => edge?.node?.id === createdDocs[1].docId && edge?.node?.inTrash === true),
+      "list_docs trashed state sync",
+    );
+    const trashedDoc = await call("read_doc", {
+      workspaceId: workspace.id,
+      docId: createdDocs[1].docId,
+    });
+    expectEqual(trashedDoc?.exists, true, "trash_doc preserves content");
+
+    const restored = await call("restore_doc", {
+      workspaceId: workspace.id,
+      docId: createdDocs[1].docId,
+    });
+    expectEqual(restored?.status, "restored", "restore_doc status");
+    expectEqual(restored?.inTrash, false, "restore_doc inTrash");
+    expectEqual(restored?.readBackVerified, true, "restore_doc readBackVerified");
+    await waitForListDocs(
+      workspace.id,
+      result => result?.edges?.some(edge => edge?.node?.id === createdDocs[1].docId && edge?.node?.inTrash === false),
+      "list_docs restored state sync",
+    );
+
     await call("create_tag", { workspaceId: workspace.id, tag: "urgent" });
     await call("add_tag_to_doc", {
       workspaceId: workspace.id,
@@ -193,6 +225,30 @@ async function main() {
       limit: 10,
     });
     expectEqual(sortedByUpdatedAt?.results?.[0]?.title, "Task Tracker", "search_docs updatedAt sort");
+
+    const firstSearchPage = await call("search_docs", {
+      workspaceId: workspace.id,
+      query: "Task",
+      limit: 1,
+      offset: 0,
+    });
+    expectEqual(firstSearchPage?.results?.length, 1, "search_docs first page size");
+    expectEqual(firstSearchPage?.limit, 1, "search_docs first page limit");
+    expectEqual(firstSearchPage?.offset, 0, "search_docs first page offset");
+    expectEqual(firstSearchPage?.hasMore, true, "search_docs first page hasMore");
+    expectEqual(firstSearchPage?.truncated, true, "search_docs first page truncated");
+    expectEqual(firstSearchPage?.nextOffset, 1, "search_docs nextOffset");
+
+    const secondSearchPage = await call("search_docs", {
+      workspaceId: workspace.id,
+      query: "Task",
+      limit: 1,
+      offset: 1,
+    });
+    expectEqual(secondSearchPage?.results?.length, 1, "search_docs second page size");
+    expectEqual(secondSearchPage?.hasMore, false, "search_docs second page hasMore");
+    expectEqual(secondSearchPage?.truncated, false, "search_docs second page truncated");
+    expectEqual(secondSearchPage?.nextOffset, null, "search_docs final nextOffset");
 
     await waitForListDocs(
       workspace.id,

@@ -2,6 +2,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_PATH = path.resolve(__dirname, "..", "src", "index.ts");
 const REPO_ROOT = path.resolve(__dirname, "..");
+const TSX_CLI_PATH = path.resolve(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+const MANIFEST_TOOLS = JSON.parse(
+  fs.readFileSync(path.resolve(REPO_ROOT, "tool-manifest.json"), "utf8"),
+).tools;
 const execFileAsync = promisify(execFile);
 
 async function listToolEntries(env = {}) {
@@ -17,10 +22,10 @@ async function listToolEntries(env = {}) {
     { capabilities: {} }
   );
 
-  // Use npx tsx to avoid having to run tsc
+  // Use the installed tsx CLI directly to avoid shell-specific npx launchers.
   const transport = new StdioClientTransport({
-    command: "npx",
-    args: ["tsx", SRC_PATH],
+    command: process.execPath,
+    args: [TSX_CLI_PATH, SRC_PATH],
     env: {
       ...process.env,
       ...env,
@@ -34,6 +39,40 @@ async function listToolEntries(env = {}) {
   const result = await client.listTools();
   await transport.close();
   return result.tools;
+}
+
+async function inspectAdvertisedSurface(env = {}) {
+  const client = new Client(
+    { name: "capability-surface-test-client", version: "1.0.0" },
+    { capabilities: {} }
+  );
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [TSX_CLI_PATH, SRC_PATH],
+    env: {
+      ...process.env,
+      ...env,
+      AFFINE_BASE_URL: "http://localhost:3000",
+      AFFINE_API_TOKEN: "dummy_token",
+      XDG_CONFIG_HOME: "/tmp/affine-capabilities-" + Date.now(),
+    },
+  });
+
+  try {
+    await client.connect(transport);
+    const tools = await client.listTools();
+    const capabilitiesResult = await client.callTool({ name: "get_capabilities", arguments: {} });
+    const capabilities = capabilitiesResult?.structuredContent ?? JSON.parse(
+      capabilitiesResult?.content?.[0]?.text || "{}",
+    );
+    return { toolNames: tools.tools.map(tool => tool.name), capabilities };
+  } finally {
+    await transport.close();
+  }
+}
+
+function sameToolNames(left, right) {
+  return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 }
 
 async function testFiltering(env = {}) {
@@ -64,7 +103,7 @@ async function inspectToolSurfacePolicy() {
       disabledRejectsUnknown: rejectsUnknown(disabled)
     }));
   `;
-  const { stdout } = await execFileAsync("npx", ["tsx", "--eval", script], {
+  const { stdout } = await execFileAsync(process.execPath, [TSX_CLI_PATH, "--eval", script], {
     cwd: REPO_ROOT,
     env: process.env,
   });
@@ -73,7 +112,7 @@ async function inspectToolSurfacePolicy() {
 
 async function expectInvalidConfiguration(env, expectedMessages) {
   try {
-    await execFileAsync("npx", ["tsx", SRC_PATH], {
+    await execFileAsync(process.execPath, [TSX_CLI_PATH, SRC_PATH], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
@@ -110,17 +149,28 @@ async function run() {
       "create_doc_from_template",
       "duplicate_doc",
       "find_and_replace",
+      "generate_access_token",
       "get_doc_by_title",
       "get_docs_by_tag",
       "list_backlinks",
+      "list_access_tokens",
       "list_unresolved_threads",
+      "revoke_access_token",
       "update_database_cell",
     ];
     const stillRegistered = removedTools.filter(t => allTools.includes(t));
-    if (allTools.length === 94 && stillRegistered.length === 0) {
-      console.log("✅ Success: Default tool surface exposes 94 tools.");
+    const actualTools = [...allTools].sort();
+    const expectedTools = [...MANIFEST_TOOLS].sort();
+    const exactManifestMatch = JSON.stringify(actualTools) === JSON.stringify(expectedTools);
+    if (exactManifestMatch && stillRegistered.length === 0) {
+      console.log(`✅ Success: Default tool surface exactly matches all ${MANIFEST_TOOLS.length} manifest tools.`);
     } else {
-      console.error(`❌ Failed: Default tool surface mismatch. count=${allTools.length} stillRegistered=${stillRegistered.join(", ")}`);
+      const missing = expectedTools.filter(tool => !actualTools.includes(tool));
+      const extra = actualTools.filter(tool => !expectedTools.includes(tool));
+      console.error(
+        `❌ Failed: Default tool surface mismatch. count=${allTools.length} ` +
+        `missing=${missing.join(", ")} extra=${extra.join(", ")} stillRegistered=${stillRegistered.join(", ")}`,
+      );
       hasFailures = true;
     }
 
@@ -138,12 +188,63 @@ async function run() {
       toolsByName.list_docs?.annotations?.readOnlyHint === true &&
       toolsByName.list_docs?.annotations?.idempotentHint === true &&
       toolsByName.delete_doc?.annotations?.destructiveHint === true &&
+      toolsByName.replace_doc_with_markdown?.annotations?.destructiveHint === true &&
+      toolsByName.trash_doc?.annotations?.destructiveHint === false &&
+      toolsByName.trash_doc?.annotations?.idempotentHint === true &&
+      toolsByName.restore_doc?.annotations?.destructiveHint === false &&
+      toolsByName.restore_doc?.annotations?.idempotentHint === true &&
       toolsByName.create_doc?.annotations?.readOnlyHint === false &&
       toolsByName.create_doc?.annotations?.destructiveHint === false;
     if (missingAnnotations.length === 0 && annotationExpectations) {
       console.log("✅ Success: Tool annotations are populated and match representative read/write/destructive tools.");
     } else {
       console.error(`❌ Failed: Tool annotations missing or mismatched. missing=${missingAnnotations.map(t => t.name).join(", ")}`);
+      hasFailures = true;
+    }
+
+    // 0b. Every advertised tool declares an object-shaped result contract.
+    console.log("\nCase 0b: Default tools expose MCP output schemas");
+    const missingOutputSchemas = defaultToolEntries.filter(tool =>
+      !tool.outputSchema || tool.outputSchema.type !== "object"
+    );
+    if (missingOutputSchemas.length === 0) {
+      console.log("✅ Success: All default tools expose object-shaped output schemas.");
+    } else {
+      console.error(`❌ Failed: Output schemas missing or invalid. tools=${missingOutputSchemas.map(t => t.name).join(", ")}`);
+      hasFailures = true;
+    }
+
+    // 0c. Capabilities must distinguish static support from the effective MCP surface.
+    console.log("\nCase 0c: Capabilities effective tools match tools/list");
+    const capabilityCases = [
+      ["full", { AFFINE_TOOL_PROFILE: "full", AFFINE_DISABLED_GROUPS: "", AFFINE_DISABLED_TOOLS: "" }],
+      ["read_only", { AFFINE_TOOL_PROFILE: "read_only", AFFINE_DISABLED_GROUPS: "", AFFINE_DISABLED_TOOLS: "" }],
+      ["disabled", { AFFINE_TOOL_PROFILE: "full", AFFINE_DISABLED_GROUPS: "", AFFINE_DISABLED_TOOLS: "create_doc" }],
+    ];
+    const capabilityFailures = [];
+    for (const [label, env] of capabilityCases) {
+      const surface = await inspectAdvertisedSurface(env);
+      const server = surface.capabilities?.server;
+      const effective = server?.effective;
+      const supportedMatchesManifest = sameToolNames(server?.supportedTools || [], MANIFEST_TOOLS);
+      const effectiveMatchesToolsList = sameToolNames(effective?.enabledTools || [], surface.toolNames);
+      const profileMatches = effective?.profile === (label === "disabled" ? "full" : label);
+      if (!supportedMatchesManifest || !effectiveMatchesToolsList || !profileMatches) {
+        capabilityFailures.push({
+          label,
+          supportedMatchesManifest,
+          effectiveMatchesToolsList,
+          profile: effective?.profile,
+          toolCount: surface.toolNames.length,
+          enabledCount: effective?.enabledTools?.length,
+        });
+      }
+    }
+    if (capabilityFailures.length === 0) {
+      console.log("✅ Success: Full, read-only, and disabled surfaces report effective tools/list accurately.");
+    } else {
+      console.error("❌ Failed: Capability effective surface diverged from tools/list.");
+      console.error(JSON.stringify(capabilityFailures, null, 2));
       hasFailures = true;
     }
 
@@ -226,7 +327,12 @@ async function run() {
     const readOnlyHidden = [
       "create_doc",
       "append_block",
+      "move_block",
       "delete_doc",
+      "trash_doc",
+      "restore_doc",
+      "update_block",
+      "update_table_cell",
       "update_database_row",
       "add_surface_element",
       "read_all_notifications",
@@ -247,13 +353,14 @@ async function run() {
       AFFINE_TOOL_PROFILE: "core",
     });
     const trimmed = [
+      "replace_doc_with_markdown",
       "delete_workspace",
       "cleanup_blobs",
       "create_workspace_blueprint",
       "add_organize_link",
     ];
     const unexpectedlyVisible = trimmed.filter(t => tools7.includes(t));
-    const coreExpected = ["create_doc", "append_block", "read_doc", "update_database_row"];
+    const coreExpected = ["create_doc", "append_block", "move_block", "read_doc", "trash_doc", "restore_doc", "update_block", "update_table_cell", "update_database_row"];
     const coreMissing = coreExpected.filter(t => !tools7.includes(t));
     if (unexpectedlyVisible.length === 0 && coreMissing.length === 0) {
       console.log("✅ Success: Core profile exposes the compact everyday surface.");
@@ -268,18 +375,31 @@ async function run() {
       AFFINE_TOOL_PROFILE: "authoring",
     });
     const hiddenAuthoring = [
+      "replace_doc_with_markdown",
       "delete_doc",
       "delete_surface_element",
       "cleanup_blobs",
       "update_profile",
     ];
     const visibleRestricted = hiddenAuthoring.filter(t => tools8.includes(t));
-    const expectedAuthoring = ["create_semantic_page", "instantiate_template_native", "add_surface_element", "update_surface_element"];
+    const expectedAuthoring = ["create_semantic_page", "instantiate_template_native", "add_surface_element", "move_block", "trash_doc", "restore_doc", "update_block", "update_table_cell", "update_surface_element"];
     const missingAuthoring = expectedAuthoring.filter(t => !tools8.includes(t));
     if (visibleRestricted.length === 0 && missingAuthoring.length === 0) {
       console.log("✅ Success: Authoring profile keeps editing tools while hiding restricted tools.");
     } else {
       console.error(`❌ Failed: Authoring profile mismatch. visible=${visibleRestricted.join(", ")} missing=${missingAuthoring.join(", ")}`);
+      hasFailures = true;
+    }
+
+    const withoutDestructiveTools = await testFiltering({ AFFINE_DISABLED_GROUPS: "destructive" });
+    if (
+      allTools.includes("replace_doc_with_markdown") &&
+      !withoutDestructiveTools.includes("replace_doc_with_markdown") &&
+      withoutDestructiveTools.includes("append_markdown")
+    ) {
+      console.log("✅ Success: Full replacement requires destructive tools; appending remains available.");
+    } else {
+      console.error("❌ Failed: Destructive filtering did not isolate full document replacement.");
       hasFailures = true;
     }
 

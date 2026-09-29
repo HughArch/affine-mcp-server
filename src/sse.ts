@@ -253,6 +253,14 @@ export async function startHttpMcpServer(
     sendJsonRpcError(res, 503, -32002, message);
   };
 
+  const rejectSessionCapacity = (res: Response) => rejectUnavailable(
+    res,
+    `Server busy: maximum HTTP MCP session capacity reached ` +
+      `(${sessions.size + pendingSessionCount}/${runtimeConfig.maxSessions} slots used; ` +
+      `${sessions.size} established, ${pendingSessionCount} initializing). ` +
+      `Close unused sessions or review AFFINE_MCP_HTTP_MAX_SESSIONS and AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS.`,
+  );
+
   const reserveSessionSlot = (): (() => void) | null => {
     if (!hasSessionCapacity()) return null;
     pendingSessionCount += 1;
@@ -359,7 +367,7 @@ export async function startHttpMcpServer(
 
         releaseReservation = reserveSessionSlot() || undefined;
         if (!releaseReservation) {
-          rejectUnavailable(res, "Server busy: maximum HTTP MCP session capacity reached");
+          rejectSessionCapacity(res);
           return;
         }
 
@@ -387,6 +395,9 @@ export async function startHttpMcpServer(
 
         const mcpServer = await createMcpServer();
         await mcpServer.connect(transport);
+      } else if (sessionId && !existing) {
+        sendJsonRpcError(res, 404, -32001, "Session not found");
+        return;
       } else {
         sendJsonRpcError(
           res,
@@ -438,7 +449,7 @@ export async function startHttpMcpServer(
         return;
       }
       if (!hasSessionCapacity()) {
-        rejectUnavailable(res, "Server busy: maximum HTTP MCP session capacity reached");
+        rejectSessionCapacity(res);
         return;
       }
 

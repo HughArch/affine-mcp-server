@@ -1,6 +1,6 @@
 {
   "name": "affine-mcp-server",
-  "version": "3.1.0",
+  "version": "3.8.4",
   "private": false,
   "type": "module",
   "description": "Model Context Protocol server for AFFiNE - enables AI assistants to interact with AFFiNE workspaces, documents, and collaboration features.",
@@ -24,7 +24,8 @@
   ],
   "main": "dist/index.js",
   "bin": {
-    "affine-mcp": "bin/affine-mcp"
+    "affine-mcp": "bin/affine-mcp",
+    "affine-mcp-http-proxy": "bin/affine-mcp-http-proxy"
   },
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{ recursive: true, force: true })\"",
@@ -34,7 +35,7 @@
     "start:http": "MCP_TRANSPORT=http node dist/index.js",
     "pretest": "npm run build",
     "test": "npm run test:metadata && npm run test:fast",
-    "test:metadata": "npm run test:tool-manifest && npm run test:surface-element-gating && npm run test:suite-manifest && npm run test:docs",
+    "test:metadata": "npm run test:tool-manifest && npm run test:output-schemas && npm run test:surface-element-gating && npm run test:suite-manifest && npm run test:docs",
     "test:fast": "node scripts/run-test-suite.mjs fast",
     "test:suite-manifest": "node scripts/verify-test-suites.mjs",
     "test:live-safety": "node tests/test-live-test-safety.mjs",
@@ -44,6 +45,7 @@
     "test:cli-live": "node tests/test-cli-live.mjs",
     "test:notification-contract": "node tests/test-notification-contract.mjs",
     "test:tool-manifest": "node scripts/verify-tool-manifest.mjs",
+    "test:output-schemas": "node --import tsx tests/test-output-schemas.mjs",
     "test:markdown-linked-page": "node tests/test-markdown-linked-page.mjs",
     "test:release-verification": "node tests/test-release-verification.mjs",
     "test:package-smoke": "node tests/test-package-smoke.mjs",
@@ -59,6 +61,7 @@
     "test:comprehensive": "bash tests/run-comprehensive.sh",
     "test:comprehensive:raw": "node test-comprehensive.mjs",
     "test:e2e": "bash tests/run-e2e.sh",
+    "test:block-editing": "node tests/test-block-editing.mjs",
     "test:db-create": "node tests/test-database-creation.mjs",
     "test:db-cells": "node tests/test-database-cells.mjs",
     "test:db-linked-doc": "node tests/test-database-linked-doc.mjs",
@@ -100,7 +103,8 @@
     "pack:check": "npm pack --dry-run",
     "release:verify": "node scripts/verify-release.mjs",
     "ci": "npm test && npm run pack:check",
-    "prepublishOnly": "npm run ci"
+    "prepublishOnly": "npm run ci",
+    "test:concurrent-writes": "node tests/test-concurrent-writes.mjs"
   },
   "files": [
     "bin",
@@ -122,7 +126,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "form-data": "^4.0.4",
@@ -131,16 +135,16 @@
     "markdown-it": "^14.1.0",
     "node-fetch": "^3.3.2",
     "socket.io-client": "^4.8.1",
-    "undici": "^6.27.0",
+    "undici": "^7.29.0",
     "yjs": "^13.6.27",
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/markdown-it": "^14.1.2",
-    "@types/node": "^26.0.1",
+    "@types/node": "^24.13.4",
     "tsx": "^4.16.2",
     "typescript": "^7.0.2"
   }

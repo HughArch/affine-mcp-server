@@ -5,7 +5,10 @@ import * as Y from "yjs";
 import FormData from "form-data";
 import fetch from "node-fetch";
 import { receipt, text, toolError } from "../util/mcp.js";
-import { secureRandomString } from "../util/random.js";
+import { secureAffineId } from "../util/random.js";
+import { ensureDocumentCreator, fetchCurrentUserId } from "../util/docCreator.js";
+import { fetchResponseBody } from "../util/httpResponse.js";
+import { readWorkspaceProfile } from "../workspaceProfile.js";
 import {
   connectWorkspaceSocket,
   joinWorkspace,
@@ -38,14 +41,16 @@ const DEFAULT_WORKSPACE_TOOL_DEPENDENCIES: WorkspaceToolDependencies = {
   loadDoc,
 };
 
-function affineBaseUrl(endpoint: string): string {
-  const configuredBaseUrl = process.env.AFFINE_BASE_URL?.trim();
-  return (configuredBaseUrl || new URL(endpoint).origin).replace(/\/+$/, "");
+const WORKSPACE_CREATE_TIMEOUT_MS = 30_000;
+
+function affineBaseUrl(endpoint: string, configuredBaseUrl?: string): string {
+  const explicitBaseUrl = configuredBaseUrl?.trim() || process.env.AFFINE_BASE_URL?.trim();
+  return (explicitBaseUrl || new URL(endpoint).origin).replace(/\/+$/, "");
 }
 
 function summarizeWorkspace(
   workspace: WorkspaceRecord,
-  endpoint: string,
+  baseUrl: string,
   profileStatus: WorkspaceProfileStatus,
   profile?: { name: string | null; avatar: string | null },
 ): WorkspaceSummary {
@@ -55,30 +60,8 @@ function summarizeWorkspace(
     ...workspace,
     name: profile?.name ?? existingName,
     avatar: profile?.avatar ?? existingAvatar,
-    url: `${affineBaseUrl(endpoint)}/workspace/${encodeURIComponent(workspace.id)}`,
+    url: `${baseUrl}/workspace/${encodeURIComponent(workspace.id)}`,
     profileStatus,
-  };
-}
-
-async function readWorkspaceProfile(
-  socket: WorkspaceSocket,
-  workspaceId: string,
-  dependencies: WorkspaceToolDependencies,
-): Promise<{ name: string | null; avatar: string | null }> {
-  await dependencies.joinWorkspace(socket, workspaceId);
-  const snapshot = await dependencies.loadDoc(socket, workspaceId, workspaceId);
-  if (!snapshot.missing) {
-    throw new Error(`Workspace profile metadata is unavailable for ${workspaceId}.`);
-  }
-
-  const workspaceDoc = new Y.Doc();
-  Y.applyUpdate(workspaceDoc, Buffer.from(snapshot.missing, "base64"));
-  const meta = workspaceDoc.getMap("meta");
-  const name = meta.get("name");
-  const avatar = meta.get("avatar");
-  return {
-    name: typeof name === "string" ? name : null,
-    avatar: typeof avatar === "string" ? avatar : null,
   };
 }
 
@@ -89,8 +72,9 @@ async function enrichWorkspaceProfiles(
   dependencies: WorkspaceToolDependencies,
 ): Promise<WorkspaceSummary[]> {
   const endpoint = gql.endpoint;
+  const baseUrl = affineBaseUrl(endpoint, gql.baseUrl);
   if (!includeProfile) {
-    return workspaces.map(workspace => summarizeWorkspace(workspace, endpoint, "skipped"));
+    return workspaces.map(workspace => summarizeWorkspace(workspace, baseUrl, "skipped"));
   }
   if (workspaces.length === 0) {
     return [];
@@ -105,17 +89,20 @@ async function enrichWorkspaceProfiles(
       bearer,
     );
   } catch {
-    return workspaces.map(workspace => summarizeWorkspace(workspace, endpoint, "unavailable"));
+    return workspaces.map(workspace => summarizeWorkspace(workspace, baseUrl, "unavailable"));
   }
 
   try {
     const enriched: WorkspaceSummary[] = [];
     for (const workspace of workspaces) {
       try {
-        const profile = await readWorkspaceProfile(socket, workspace.id, dependencies);
-        enriched.push(summarizeWorkspace(workspace, endpoint, "available", profile));
+        const profile = await readWorkspaceProfile(socket, workspace.id, {
+          joinWorkspace: dependencies.joinWorkspace,
+          loadDoc: dependencies.loadDoc,
+        });
+        enriched.push(summarizeWorkspace(workspace, baseUrl, "available", profile));
       } catch {
-        enriched.push(summarizeWorkspace(workspace, endpoint, "unavailable"));
+        enriched.push(summarizeWorkspace(workspace, baseUrl, "unavailable"));
       }
     }
     return enriched;
@@ -124,11 +111,7 @@ async function enrichWorkspaceProfiles(
   }
 }
 
-// Generate AFFiNE-style document ID
-function generateDocId(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
-  return secureRandomString(10, chars);
-}
+const generateDocId = secureAffineId;
 
 // Create initial workspace data with a document
 function createInitialWorkspaceData(workspaceName: string = 'New Workspace', avatar: string = '') {
@@ -146,9 +129,11 @@ function createInitialWorkspaceData(workspaceName: string = 'New Workspace', ava
   
   // Add first document metadata
   const pageMetadata = new Y.Map();
+  const createdAt = Date.now();
   pageMetadata.set('id', firstDocId);
   pageMetadata.set('title', 'Welcome to ' + workspaceName);
-  pageMetadata.set('createDate', Date.now());
+  pageMetadata.set('createDate', createdAt);
+  pageMetadata.set('updatedDate', createdAt);
   pageMetadata.set('tags', new Y.Array());
   
   pages.push([pageMetadata]);
@@ -225,14 +210,6 @@ function createInitialWorkspaceData(workspaceName: string = 'New Workspace', ava
   
   blocks.set(paragraphId, paragraphBlock);
   noteChildren.push([paragraphId]);
-  
-  // Set document metadata
-  const docMeta = docYDoc.getMap('meta');
-  docMeta.set('id', firstDocId);
-  docMeta.set('title', 'Welcome to ' + workspaceName);
-  docMeta.set('createDate', Date.now());
-  docMeta.set('tags', new Y.Array());
-  docMeta.set('version', 1);
   
   // Encode document update
   const docUpdate = Y.encodeStateAsUpdate(docYDoc);
@@ -328,6 +305,7 @@ export function registerWorkspaceTools(
       try {
         // Wait for the shared auth session before multipart or WebSocket operations.
         const { endpoint, headers, cookie, bearer } = await gql.getConnectionAuth();
+        const creatorId = await fetchCurrentUserId(gql);
         
         // Create initial workspace data
         const { workspaceUpdate, firstDocId, docUpdate } = createInitialWorkspaceData(name, avatar || '');
@@ -362,16 +340,35 @@ export function registerWorkspaceTools(
         });
         
         // Send request
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            ...headers,
-            ...form.getHeaders()
-          },
-          body: form as any
-        });
-        
-        const result = await response.json() as any;
+        const { response, body } = await fetchResponseBody(
+          signal => fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              ...headers,
+              ...form.getHeaders()
+            },
+            body: form as any,
+            signal,
+          }),
+          { label: "Workspace creation request", timeoutMs: WORKSPACE_CREATE_TIMEOUT_MS },
+        );
+
+        let result: any;
+        try {
+          result = JSON.parse(body);
+        } catch {
+          if (!response.ok) {
+            throw new Error(`Workspace creation failed with HTTP ${response.status}.`);
+          }
+          throw new Error("Workspace creation returned invalid JSON.");
+        }
+
+        if (!response.ok) {
+          const message = typeof result.errors?.[0]?.message === "string"
+            ? `: ${result.errors[0].message}`
+            : "";
+          throw new Error(`Workspace creation failed with HTTP ${response.status}${message}`);
+        }
         
         if (result.errors) {
           throw new Error(result.errors[0].message);
@@ -379,7 +376,7 @@ export function registerWorkspaceTools(
         
         const workspace = result.data.createWorkspace;
         const wsUrl = wsUrlFromGraphQLEndpoint(endpoint);
-        const baseUrl = affineBaseUrl(endpoint);
+        const baseUrl = affineBaseUrl(endpoint, gql.baseUrl);
 
         try {
           const socket = await connectWorkspaceSocket(wsUrl, cookie, bearer);
@@ -387,6 +384,7 @@ export function registerWorkspaceTools(
             await joinWorkspace(socket, workspace.id);
             const docUpdateBase64 = Buffer.from(docUpdate).toString('base64');
             await pushDocUpdate(socket, workspace.id, firstDocId, docUpdateBase64);
+            await ensureDocumentCreator(socket, workspace.id, firstDocId, creatorId);
           } finally {
             socket.disconnect();
           }
@@ -400,7 +398,9 @@ export function registerWorkspaceTools(
             firstDocId,
             syncStatus: "partial",
             status: "partial",
-            message: "Workspace created (document sync may be pending)",
+            message: "Workspace created; initial document or creator sync failed. No automatic retry is scheduled.",
+            requiresManualRepair: true,
+            recoveryGuidance: `Workspace ${workspace.id} was created, but initial document or creator synchronization did not complete. Read workspace ${workspace.id} and document ${firstDocId} before any repair because the timed-out write may have persisted. Repair the existing document manually if needed; do not call create_workspace again. No automatic retry is scheduled.`,
             url: `${baseUrl}/workspace/${workspace.id}`
           });
         }
@@ -444,6 +444,11 @@ export function registerWorkspaceTools(
   // UPDATE WORKSPACE
   const updateWorkspaceHandler = async ({ id, public: isPublic, enableAi }: { id: string; public?: boolean; enableAi?: boolean }) => {
       try {
+        if (isPublic === undefined && enableAi === undefined) {
+          return toolError("update_workspace requires at least one of: public, enableAi", {
+            code: "invalid_arguments",
+          });
+        }
         const mutation = `
           mutation UpdateWorkspace($input: UpdateWorkspaceInput!) {
             updateWorkspace(input: $input) {
@@ -484,7 +489,7 @@ export function registerWorkspaceTools(
     "update_workspace",
     {
       title: "Update Workspace",
-      description: "Update workspace settings",
+      description: "Update workspace settings. Requires at least one of public or enableAi.",
       inputSchema: {
         id: z.string().describe("Workspace ID"),
         public: z.boolean().optional().describe("Make workspace public"),

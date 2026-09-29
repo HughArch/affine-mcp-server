@@ -7,6 +7,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.4] - 2026-09-29
+
+### Fixed
+- Record the authenticated AFFiNE user as the creator of new pages, including welcome pages and template instances, without replacing an existing creator. Reconcile incomplete creator writes before reporting document creation success.
+- Read and write custom properties in AFFiNE's workspace-scoped documents so definitions and values appear in the native UI and UI edits are visible to MCP. Keep older unscoped data accessible through the opt-in `includeLegacy` recovery result without overwriting native state.
+- Convert plain and legacy text comments to native BlockSuite snapshots; preserve rich snapshots and reject malformed payloads before writing.
+- Save a Markdown note and its children in one document update so a rejected child cannot leave an empty note behind.
+- Report a non-retryable partial-write error when saved page content has no workspace metadata entry to update.
+
+### Tests
+- Verify all custom-property types in Chrome, including UI-to-MCP edits, clearing values, and deleting definitions; verify comment creation, update, and deletion in the native sidebar.
+- Add supporting-tool integration coverage to the release E2E suite and regressions for malformed comments, orphan-page metadata, and rejected Markdown children.
+
+## [3.8.3] - 2026-09-28
+
+### Changed
+- Include occupied, established, and initializing session counts in HTTP capacity errors while preserving HTTP 503 and JSON-RPC error -32002.
+- Document HTTP session limits and defaults in the README, with session termination and capacity troubleshooting guidance.
+
+### Fixed
+- Keep workspace page modification timestamps current after MCP document creation and editing so AFFiNE's updated-date lists and sorting reflect those writes.
+- Validate inline LinkedPage reference writes across document blocks, table cells, and database cells, and use AFFiNE's native reference marker for generated links.
+- Read named sidebar icons set in the AFFiNE UI: `get_doc_icon` and `get_folder_icon` accept AFFiNE's `{ type: "affine-icon", name, color }` shape instead of failing output validation.
+- Write named icons with AFFiNE's `affine-icon` type and keep the optional CSS `color` in `update_doc_icon` and `update_folder_icon`, so they render in AFFiNE. `type: "icon"` is still accepted as input and still readable when stored by earlier versions.
+
+### Tests
+- Disable rate limiting in disposable AFFiNE test instances so repeated authentication does not interrupt E2E coverage.
+- Add offline coverage for named-icon input normalization and output validation, and a colored-icon round trip to the live icon test.
+
+## [3.8.2] - 2026-09-22
+
+### Fixed
+- Keep MCP-created page documents compatible with AFFiNE version history restore by preserving the page document's canonical top-level structure.
+- Preserve canonical workspace titles and tags when collection rules evaluate documents, preventing stale legacy metadata from overriding titles or restoring removed tags.
+
+### Tests
+- Add browser and integration regression coverage for history restoration and collection-rule matching with legacy document metadata.
+
+## [3.8.1] - 2026-09-21
+
+### Fixed
+- Reuse tool output schemas across HTTP sessions to prevent Zod metadata from retaining a new schema graph on every connection and eventually exhausting the JavaScript heap.
+- Accept case-insensitive JSON and GraphQL response media types while preserving `application/graphql-response+json` support.
+- Update the runnable Docker deployment examples to the 3.8.1 image.
+- Allow `create_doc_from_markdown` to place the new document directly in an organize folder, and warn when structured Markdown is passed to the plain-text `create_doc.content` field, including table-only Markdown.
+- Keep structured-Markdown warning detection linear for unmatched inline-link delimiters.
+
+### Changed
+- Update `markdown-it` to 14.3.2 and development Node.js type definitions to 24.13.4.
+
+### Tests
+- Check that repeated HTTP sessions release their memory after explicit termination and idle expiry, while tool discovery and output validation remain intact.
+- Verify the Markdown creation folder contract, native block materialization, and the plain-text Markdown warning in the disposable E2E suite; cover long unmatched delimiters in the fast suite.
+
+## [3.8.0] - 2026-09-14
+
+### Added
+- Added `update_table_column_widths` plus `read_doc.tableColumnWidths` for reversible, content-preserving native table sizing.
+- Serialize complete MCP write operations per workspace across sessions in one server process. Separate workspaces remain independent, and queued requests have bounded waits and cancellation handling.
+- Return a document content `revision` from `read_doc` and accept optional `expectedRevision` on document content mutations to reject stale edits before mutation.
+- Added `login --save-credentials`, which stores the email/password used to sign in instead of the session cookie, so the server can sign in on its own and renew the session before it expires.
+
+### Changed
+- Add name-first `workspaces [--json]` discovery and validated `workspace [id]` default selection without re-authentication; selection changes only the local default workspace.
+- Make login reuse the configured URL, fall back from missing workspace names to `Workspace name unavailable`, retry invalid selections, and cancel safely on `q` or end-of-file without writing credentials.
+- Generate client snippets from the resolved configuration, with `--env` preserving credentials and workspace selection while keeping environment precedence explicit.
+- Separate supported capabilities from the effective enabled tool surface and expose pagination state for `search_docs` through `offset`, `hasMore`, `truncated`, and `nextOffset`.
+- Clarify saved-config precedence versus environment-only HTTP, proxy, WebSocket, and runtime controls, and document the actual `doctor` checks.
+
+### Fixed
+- Accept equivalent normalized saved URLs when selecting a default workspace, and classify non-JSON HTTP failures before validating successful GraphQL response content types.
+- Wait for the AFFiNE healthcheck before publishing the disposable Docker gateway during standard Compose startup.
+- Honor `AFFINE_ALLOW_INSECURE_HTTP` in `affine-mcp login`. The CLI granted the plain-HTTP opt-in to `validateBaseUrl` and then re-validated the same URL through `buildGraphqlEndpoint`, which dropped the option, so login always failed with "must use HTTPS for non-loopback destinations" on a self-hosted instance reached over plain HTTP. Runtime configuration was unaffected because `loadConfig` builds the endpoint itself.
+- Default the `login` URL prompt to the configured `AFFINE_BASE_URL` from the environment or the saved config file. The prompt displayed and fell back to `https://app.affine.pro`, so pressing Enter silently replaced a configured self-hosted URL with the AFFiNE Cloud URL.
+- Read the `AFFINE_ALLOW_INSECURE_HTTP` opt-in from the saved config file during `login`, matching runtime precedence (environment first, then config file).
+- Classify AFFiNE Cloud by complete hostname labels instead of substring-matching `affine.pro`. Self-hosted deployments such as `https://affine.proxy.internal` or `https://affine.pro.example.com` previously received the Cloud login menu, which offers no email/password option.
+- Suppress the Node 26 unused Web Storage startup warning without replacing an explicitly installed polyfill, and report an unavailable workspace-root snapshot instead of a false empty workspace.
+- Preserve header-only Authorization/Cookie credentials and saved non-authentication headers during relogin while normalizing authentication, network, and uncertain-write failures with actionable recovery guidance.
+- Make `doctor` validate selected-workspace membership, realtime root access, effective tool filters, HTTP exposure, and OAuth readiness before reporting success.
+- Keep workspace and document browser links based on the configured AFFiNE base URL when `AFFINE_GRAPHQL_PATH` uses a custom route, and document manual recovery for partial workspace creation without duplicate creates.
+
+### Tests
+- Verify native table width changes and automatic sizing restoration against a live AFFiNE instance while preserving cell content.
+- Cover workspace queue ordering, cancellation, failure recovery, overload, and deletion-aware document revisions.
+- Verify concurrent writes through multiple HTTP sessions and independent stdio proxy processes against a local AFFiNE instance.
+- Added `tests/test-insecure-http-opt-in.mjs` covering opt-in forwarding through `buildGraphqlEndpoint`, Cloud/self-hosted hostname classification, and the `login` CLI path with the opt-in supplied by the environment and by the config file.
+- Cover CLI workspace selection, safe login cancellation, discovery failure handling, snippet propagation, search pagination, capability-surface reporting, and partial workspace recovery.
+- Add regression coverage for Node 26 startup warnings, doctor membership/realtime/filter checks, header-only relogin, email/password credential saving with stale authentication headers, and shared handler error envelopes.
+
+## [3.7.0] - 2026-09-10
+
+### Added
+- Added `affine-mcp-http-proxy` to connect a local stdio client to an existing loopback Streamable HTTP listener without starting another full server.
+
+### Fixed
+- Recover explicitly expired HTTP MCP sessions without replaying ambiguous writes after network failures or timeouts.
+- Share email/password login attempts, retry failures after a cooldown, and renew managed cookies before expiry across long-lived transport sessions.
+- Close native stdio sessions on EOF and bound proxy signal shutdown and HTTP response reads.
+- Return JSON-RPC parse and invalid-request errors for malformed proxy input, allowing subsequent valid requests to continue.
+- Discard restored session IDs when the initialized notification fails, and preserve expired login-cookie deadlines without treating unrelated cleared cookies as expired sessions.
+
+### Security
+- Updated locked `hono` from 4.13.0 to 4.13.7 to address reported static-output path traversal, form nesting, and query parsing advisories.
+
+### Tests
+- Verify malformed-input recovery, session expiration, ambiguous writes, response timeouts, and EOF cleanup.
+- Exercise the installed proxy executable against the packaged HTTP listener and verify a live authenticated AFFiNE request through the bridge.
+- Cover failed initialized notifications, expired cookies, and bounded test polling.
+
+## [3.6.0] - 2026-09-08
+
+### Added
+- Added eight native mindmap tools for hierarchy editing, right/left/balance layouts, four styles, and native lock/unlock, with read-only discovery, validation, and request/response documentation.
+
+### Fixed
+- Declared the returned native mindmap `nodeId` in mutation output schemas; rejected reused overlay output directories and pinned the compatibility image's verified base digest.
+- Retry OAuth metadata discovery after transient failures instead of retaining rejected cache entries, and bound discovery requests.
+- Align CLI authentication diagnostics with server support for bearer and cookie credentials supplied through additional headers.
+- Preserve document pagination progress when deleted entries are filtered from a backend page.
+- Report recoverable document creation failures with the allocated document ID and persistence stage instead of losing partially created documents behind a generic error.
+- Reject invalid collection filter combinations before changing collection membership.
+
+### Changed
+- Classify full-note Markdown replacement as destructive and exclude it from `core`, `authoring`, and destructive-disabled deployments. Incremental editing remains available.
+- Reuse document skeleton and persistence helpers and a common collection mutation path.
+
+### Tests
+- Added native mindmap coverage for Yjs round trips, subtree moves, invalid topology, layout geometry, style transitions, lock inheritance, tool filtering, output contracts, and non-destructive overlay directory validation.
+- Added regression coverage for authentication recovery, CLI header credentials, document creation failures, deleted-page cursors, invalid collection rules, and destructive tool filtering.
+- Preserve credential acquisition failures in the E2E runner, verify recovery and exhaustion exit codes, and exercise native mindmap tools in the live comprehensive suite.
+
+## [3.5.1] - 2026-09-07
+
+### Security
+- Updated locked `fast-uri` to 3.1.7 and `qs` to 6.16.0 to address reported URI parsing and query-string parsing advisories, including the required `side-channel` dependency updates.
+
+### Added
+- `append_block` now returns a `warnings` entry when a `type: "table"` call creates a table with no cell content, naming `tableData`, `tableCellDeltas` and `update_table_cell` as the ways to fill it. Creating an empty table on purpose still succeeds unchanged.
+
+### Dependencies
+- Updated locked `markdown-it` from 14.3.0 to 14.3.1, `@types/markdown-it` from 14.1.2 to 14.2.0, and `tsx` from 4.23.12 to 4.23.13.
+
+### Tests
+- Added integration coverage for empty-table warnings and filling an empty table with `update_table_cell`.
+
+## [3.5.0] - 2026-08-31
+
+### Added
+- Added `update_table_cell` for in-place updates to AFFiNE table cells with zero-based coordinates and formatting-preserving rich-text deltas.
+
+### Fixed
+- `append_block` now accepts `tableData` and `tableCellDeltas`, so a table created with cell contents is no longer silently empty; previously the schema stripped both fields and only `append_markdown` could fill cells.
+
+### Dependencies
+- Updated `jose` from 6.2.9 to 6.2.10.
+
+### Tests
+- Hardened container startup smoke checks to fail immediately when the process exits and to require protected mode from the live health endpoint.
+
+## [3.4.1] - 2026-08-27
+
+### Fixed
+- Markdown rich-text operations now use one canonical content input, so strict divider validation cannot accept and then discard non-empty delta content.
+- The container now starts the HTTP server when run without arguments instead of inheriting the Node base image command and exiting; PR image checks now supply the required bearer token and wait for a healthy container.
+
+## [3.4.0] - 2026-08-27
+
+### Added
+- `append_block` and `update_block` now accept formatting-preserving rich-text delta arrays as well as plain strings.
+- `read_doc` and block-editing snapshots now expose canonical `deltas` alongside flattened text for lossless read-modify-write flows.
+
+### Security
+- AFFiNE document and workspace identifiers now use the shared cryptographically secure identifier generator.
+
+### Fixed
+- GraphQL, sign-in, readiness, CLI, blob-upload, and workspace-creation response bodies are bounded to 16 MiB while request timeouts remain active through complete body consumption.
+- Empty workspace and profile updates are rejected before reaching AFFiNE, and ignored-only surface or edgeless updates no longer push unchanged CRDT state.
+- Empty rich-text delta segments that normalize to no content no longer make divider creation fail strict validation.
+
+### Dependencies
+- Aligned the locked Node.js type definitions with the minimum supported Node.js 20 runtime.
+
+### Tests
+- Expanded CI validation to Node.js 20, 22, 24, and 26.
+- Added focused and browser-backed coverage for rich-text block formatting, bounded response handling, mutation input contracts, and no-op CRDT updates.
+
+## [3.3.0] - 2026-08-24
+
+### Added
+- Added recoverable `trash_doc` and `restore_doc` tools backed by AFFiNE workspace metadata, with idempotent retries and read-back verification.
+- Added `update_block` and `move_block` for in-place text-block editing, conversion, reordering, and reparenting without replacing block IDs.
+- Added `title` column support for AFFiNE databases, including duplicate-title rejection and synchronized updates across every stored view representation.
+
+### Changed
+- `read_doc` now reports hierarchy-derived `parentId` values, and `delete_block` returns snapshots of removed root and descendant blocks.
+- The canonical MCP tool surface now contains 96 tools.
+
+### Fixed
+- Preserved AFFiNE rich-text deltas when reading and updating database cells, while rejecting malformed rich-text inputs before mutation.
+- Unknown HTTP MCP session IDs now return `404 Session not found` instead of being treated as new-session requests.
+- Markdown export no longer over-escapes ordinary punctuation or ampersands and preserves unknown entity-like text.
+- Markdown fidelity reports now distinguish known import losses from lossless export behavior.
+
+### Dependencies
+- Refreshed the locked `jose` release from 6.2.8 to 6.2.9.
+
+### Tests
+- Added focused and browser-backed coverage for block editing, document trash recovery, database title columns and rich-text cells, HTTP session handling, and Markdown fidelity.
+
+## [3.2.2] - 2026-08-18
+
+### Fixed
+- The container `HEALTHCHECK` now probes `127.0.0.1` instead of `localhost`, which can resolve to `::1` while the server listens on IPv4 only.
+- Tool schemas are no longer advertised with the draft-07 JSON Schema dialect. The MCP SDK stamps `"$schema": "http://json-schema.org/draft-07/schema#"` onto every schema converted from Zod v3, which made clients that support JSON Schema 2020-12 only (Claude) reject every tool with `Tool has an invalid outputSchema`.
+
+### Dependencies
+- Raised `undici` from `^6.28.0` to `^7.29.0`, raised the supported Node.js floor to 20.18.1, and refreshed the locked `jose` and `yjs` releases.
+- Refreshed the locked Node.js types, `tsx`, Playwright, and Docker login action releases.
+
+## [3.2.1] - 2026-08-06
+
+### Security
+- Replaced the `affine-mcp login --cookie <value>` process-argument path with `--cookie-stdin` so browser session cookies do not appear in shell history or process listings.
+
+### Fixed
+- `affine-mcp login --workspace-id` now verifies that the requested workspace is available to the authenticated account before saving the configuration.
+- `list_docs` now falls back to bounded workspace metadata pagination when AFFiNE denies ordinary workspace members access to the GraphQL document connection.
+
+### Tests
+- Added CLI regressions for stdin cookie authentication, legacy cookie redaction, inaccessible workspace rejection, and live workspace validation.
+
+## [3.2.0] - 2026-08-04
+
+### Added
+- Added declared MCP `outputSchema` metadata for all 92 canonical tools so ChatGPT and other clients can validate structured results and reason about follow-up calls.
+
+### Security
+- Raised the minimum MCP SDK and `undici` versions and refreshed transitive dependency locks to remediate current `@hono/node-server`, `fast-uri`, `hono`, `ip-address`, `socket.io-parser`, and `undici` advisories.
+
+### Tests
+- Added output-schema coverage and MCP round-trip validation, and included it in the default test and CI gates.
+- Configured isolated comprehensive-test instances to disable AFFiNE's new-account share delay so document publish and revoke coverage runs deterministically.
+- Bounded the isolated comprehensive setup sign-in and GraphQL requests to fail promptly when AFFiNE stops responding.
+
 ## [3.1.0] - 2026-07-27
 
 ### Added
@@ -48,6 +292,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `unreadOnly` now reports that it filters only the fetched page and leaves server totals and page info unchanged.
 - `read_all_notifications` now returns `applied` and `status`; false and exception outcomes use stable MCP error envelopes instead of success-shaped responses.
 - Raised the supported Node.js runtime floor to 20 to match the installed dependency graph and added CI coverage for Node.js 20 and 24.
+- Array and scalar tool results now include a stable object-shaped `structuredContent` envelope (`items`, `text`, or `value`) while preserving the existing text content for compatibility.
 - Centralized GraphQL endpoint, transport, login, port, host, CORS, and HTTP bearer settings under one `environment > saved config > defaults` resolver with strict validation.
 - Updated `status`, `doctor`, `show-config`, login, and generated client snippets to use the same effective configuration as the MCP runtime, including custom GraphQL paths and non-token authentication.
 - Made `/readyz` verify the exact configured AFFiNE GraphQL endpoint in addition to OAuth discovery.
@@ -632,6 +877,21 @@ Document create/edit/delete is now supported. These are synchronized to real AFF
 - User management
 - Access tokens
 
+[3.8.4]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.8.4
+[3.8.3]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.8.3
+[3.8.2]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.8.2
+[3.8.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.8.1
+[3.8.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.8.0
+[3.7.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.7.0
+[3.6.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.6.0
+[3.5.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.5.1
+[3.5.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.5.0
+[3.4.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.4.1
+[3.4.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.4.0
+[3.3.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.3.0
+[3.2.2]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.2.2
+[3.2.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.2.1
+[3.2.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.2.0
 [3.1.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.1.0
 [3.0.1]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.0.1
 [3.0.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v3.0.0
@@ -662,4 +922,4 @@ Document create/edit/delete is now supported. These are synchronized to real AFF
 [1.4.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.4.0
 [1.3.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.3.0
 [1.6.0]: https://github.com/dawncr0w/affine-mcp-server/releases/tag/v1.6.0
-[Unreleased]: https://github.com/dawncr0w/affine-mcp-server/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/dawncr0w/affine-mcp-server/compare/v3.8.4...HEAD

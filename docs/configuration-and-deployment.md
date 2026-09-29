@@ -10,7 +10,14 @@ The server resolves configuration in this order:
 2. Saved config file at `$XDG_CONFIG_HOME/affine-mcp/config` when `XDG_CONFIG_HOME` is set, otherwise `~/.config/affine-mcp/config`
 3. Built-in defaults
 
-The saved config file uses the same `KEY=value` names shown below. Environment variables always override saved values, and the CLI diagnostics report the source selected for each runtime option.
+This precedence applies to the settings loaded by `loadConfig`. Those settings
+can be supplied as environment variables or saved as `KEY=value` lines in the
+config file. Some consumers intentionally read environment variables directly
+at process start; the tables below label those environment-only flags. An
+environment-only flag never comes from the saved config, even when its name
+looks like a core setting. Environment values override saved values for
+`loadConfig` keys, and the CLI diagnostics report the source selected for each
+resolved core option.
 
 Authentication credentials are resolved as one source-scoped group. If the
 environment provides any of `AFFINE_API_TOKEN`, `AFFINE_COOKIE`,
@@ -25,11 +32,15 @@ Auth priority within the active configuration:
 
 1. `AFFINE_API_TOKEN`
 2. `AFFINE_COOKIE`
-3. `AFFINE_EMAIL` and `AFFINE_PASSWORD`
+3. A Bearer `Authorization` header in `AFFINE_HEADERS_JSON`
+4. A `Cookie` header in `AFFINE_HEADERS_JSON`
+5. `AFFINE_EMAIL` and `AFFINE_PASSWORD`
 
 This priority is applied only within the selected environment or saved-config
 group. For example, environment email/password credentials take precedence
 over an older saved API token or session cookie.
+
+Header names are case-insensitive. The MCP runtime, `status`, `doctor`, and `show-config` use the same resolution, including header-only credentials. Diagnostic output redacts credential values.
 
 Email/password authentication is process-scoped. Concurrent HTTP MCP sessions
 share one sign-in attempt and the resulting cookie. In the default `async`
@@ -41,9 +52,22 @@ Bearer and cookie credentials are mutually exclusive on outbound requests.
 Explicit `sign_in` replaces the current client credential with its session
 cookie, while setting a bearer credential removes any cookie header.
 
+### Diagnostic scope
+
+`affine-mcp doctor` checks the resolved config source, base URL reachability,
+authentication, an authenticated GraphQL request, the selected workspace's
+membership and realtime root access when a default workspace is configured,
+effective tool-filter settings, HTTP exposure when `MCP_TRANSPORT=http`, and
+OAuth configuration/discovery when OAuth is enabled. It does not preflight
+every environment-only proxy, WebSocket, body-limit, session-limit, or
+shutdown flag. Those values are validated by the component that starts with
+them. A successful doctor run confirms the observed checks at that moment; it
+does not grant workspace access or replace a client restart after configuration
+changes.
+
 ## Environment variables
 
-### Core configuration
+### Core configuration (`loadConfig` and saved config)
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -52,12 +76,22 @@ cookie, while setting a bearer credential removes any cookie header.
 | `AFFINE_GRAPHQL_PATH` | No | `/graphql` | Override only if your AFFiNE deployment uses a custom GraphQL path |
 | `AFFINE_HEADERS_JSON` | No | none | JSON object of additional string headers sent to AFFiNE; built-in token/cookie auth takes priority |
 | `AFFINE_EXPORT_DIR` | No | system temp dir | Directory where `export_workspace` writes `.affine` backup files when no `outputPath` argument is given. In the Docker image this defaults to `/affine-backup`; mount a host volume there (e.g. `-v /host/backups:/affine-backup`) to persist exports outside the container. |
-| `AFFINE_WORKSPACE_ID` | No | Auto-detected when possible | Pins the active workspace |
+| `AFFINE_WORKSPACE_ID` | No | unset | Sets the default workspace used when a tool call omits `workspaceId`; login may save a selected workspace, and an explicit per-call `workspaceId` can override it |
 | `AFFINE_LOGIN_AT_START` | No | `async` | `async` starts one shared login without blocking transport startup; `sync` requires login before startup |
+
+### Environment-only process controls
+
+These values are read directly from the process environment and are not read
+from the saved config file:
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
 | `AFFINE_CLIENT_VERSION` | No | `0.26.0` | AFFiNE web-client version sent as the `x-affine-version` header on GraphQL/REST requests. Servers that gate on client version reject sign-in with `403 UNSUPPORTED_CLIENT_VERSION` when it is too low; raise this if your deployment pins a higher minimum. Also used as the fallback default for `AFFINE_WS_CLIENT_VERSION` |
 | `XDG_CONFIG_HOME` | No | `~/.config` | Changes the parent directory used for the saved `affine-mcp/config` file |
 
 ### Blob upload safeguards
+
+These controls are environment-only and are not read from the saved config file.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -66,6 +100,13 @@ cookie, while setting a bearer credential removes any cookie header.
 | `AFFINE_BLOB_UPLOAD_RESPONSE_MAX_BYTES` | No | `1048576` (1 MiB) | Maximum AFFiNE response body size read after an upload |
 
 `upload_blob` treats content as UTF-8 by default and preserves it exactly, including leading and trailing whitespace. Binary callers must pass `encoding: "base64"`; Base64 input is validated for canonical padding before it is decoded. ASCII whitespace inside explicit Base64 input is ignored.
+
+### Upstream response safeguards
+
+GraphQL, sign-in, workspace creation, and readiness requests keep their timeout
+active until the complete response body is consumed. Non-upload response bodies
+are limited to 16 MiB. `upload_blob` uses the separately configurable timeout
+and response limit above.
 
 ### Authentication
 
@@ -78,6 +119,8 @@ cookie, while setting a bearer credential removes any cookie header.
 
 ### Tool filtering
 
+These controls are environment-only and are not read from the saved config file.
+
 | Variable | Purpose |
 | --- | --- |
 | `AFFINE_TOOL_PROFILE` | Environment-only predefined tool surface profile (`full`, `read_only`, `core`, `authoring`) |
@@ -85,6 +128,11 @@ cookie, while setting a bearer credential removes any cookie header.
 | `AFFINE_DISABLED_TOOLS` | Environment-only exact canonical tool names to disable |
 
 ### HTTP mode
+
+These HTTP mode settings are `loadConfig` keys and can be supplied in the
+saved config file. The environment-only HTTP and runtime controls are listed in
+the separate environment-only controls table immediately below. This includes
+the transport, HTTP bind/auth/origin values, and all OAuth settings shown here.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -95,19 +143,30 @@ cookie, while setting a bearer credential removes any cookie header.
 | `AFFINE_MCP_HTTP_ALLOWED_ORIGINS` | No | none | Comma-separated list for browser clients |
 | `AFFINE_MCP_HTTP_ALLOW_ALL_ORIGINS` | No | `false` | Testing only; rejected in OAuth mode |
 | `AFFINE_MCP_HTTP_TOKEN` | Required for non-loopback bearer mode | none | Shared bearer token for `/mcp`, `/sse`, and `/messages` |
-| `AFFINE_MCP_HTTP_ALLOW_UNAUTHENTICATED` | No | `false` | Unsafe opt-in for an unauthenticated non-loopback bearer-mode listener |
-| `AFFINE_MCP_HTTP_ALLOW_QUERY_TOKEN` | No | `false` | Deprecated compatibility mode for `?token=` clients; prefer the `Authorization` header |
-| `AFFINE_MCP_HTTP_BODY_LIMIT` | No | `4mb` | Maximum JSON request body size; accepts bytes, `kb`, or `mb` from `1kb` through `64mb` |
-| `AFFINE_MCP_HTTP_MAX_SESSIONS` | No | `32` | Maximum combined Streamable HTTP and legacy SSE sessions |
-| `AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` | No | `1800000` | Close sessions that receive no MCP activity for this duration |
-| `AFFINE_MCP_HTTP_SHUTDOWN_TIMEOUT_MS` | No | `10000` | Deadline before remaining HTTP connections are forcibly closed |
 | `AFFINE_MCP_PUBLIC_BASE_URL` | Required in OAuth mode | none | Public base URL for this MCP server |
 | `AFFINE_OAUTH_ISSUER_URL` | Required in OAuth mode | none | OAuth issuer discovery URL |
 | `AFFINE_OAUTH_SCOPES` | No | `mcp` | Scopes advertised for OAuth-protected access |
 | `AFFINE_OAUTH_CLOCK_SKEW_SECONDS` | No | `60` | Positive integer tolerance for OAuth token timestamps |
 | `AFFINE_OAUTH_ALLOW_SERVICE_WRITES` | No | `false` | Explicitly acknowledge write-capable tools using the shared AFFiNE service identity |
 
+The following HTTP, proxy, and runtime controls are environment-only. They are
+read when the HTTP server, proxy, or WebSocket client starts and are not read
+from the saved config file:
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `AFFINE_MCP_HTTP_PROXY_URL` | No | `http://127.0.0.1:${PORT:-3000}/mcp` | Loopback Streamable HTTP endpoint used by `affine-mcp-http-proxy` |
+| `AFFINE_MCP_HTTP_PROXY_TIMEOUT_MS` | No | `60000` | Complete proxy response deadline, including its body; integer from `100` to `300000` |
+| `AFFINE_MCP_HTTP_ALLOW_UNAUTHENTICATED` | No | `false` | Unsafe opt-in for an unauthenticated non-loopback bearer listener |
+| `AFFINE_MCP_HTTP_ALLOW_QUERY_TOKEN` | No | `false` | Deprecated compatibility mode for `?token=` clients; prefer the `Authorization` header |
+| `AFFINE_MCP_HTTP_BODY_LIMIT` | No | `4mb` | Maximum JSON request body size; accepts bytes, `kb`, or `mb` from `1kb` through `64mb` |
+| `AFFINE_MCP_HTTP_MAX_SESSIONS` | No | `32` | Maximum combined Streamable HTTP and legacy SSE sessions, including pending initialization |
+| `AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` | No | `1800000` (30 minutes) | Close sessions that receive no MCP activity for this duration in milliseconds |
+| `AFFINE_MCP_HTTP_SHUTDOWN_TIMEOUT_MS` | No | `10000` | Deadline before remaining HTTP connections are forcibly closed |
+
 ### WebSocket compatibility
+
+These controls are environment-only and are not read from the saved config file.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -134,7 +193,7 @@ Important note for AFFiNE Cloud:
 Prebuilt images are published to GHCR:
 
 - `ghcr.io/dawncr0w/affine-mcp-server:latest`
-- `ghcr.io/dawncr0w/affine-mcp-server:3.0.0`
+- `ghcr.io/dawncr0w/affine-mcp-server:3.8.4`
 
 Example:
 
@@ -147,7 +206,7 @@ docker run -d \
   -e AFFINE_PASSWORD=your-password \
   -e AFFINE_MCP_AUTH_MODE=bearer \
   -e AFFINE_MCP_HTTP_TOKEN=your-strong-secret \
-  ghcr.io/dawncr0w/affine-mcp-server:latest
+  ghcr.io/dawncr0w/affine-mcp-server:3.8.4
 ```
 
 Health endpoints:
@@ -171,16 +230,91 @@ HTTP mode exposes:
 
 The HTTP transport limits JSON request bodies and the number of active sessions
 to prevent accidental resource exhaustion. Both Streamable HTTP and legacy SSE
-sessions count toward `AFFINE_MCP_HTTP_MAX_SESSIONS`. New sessions receive a
-`503` response with `Retry-After` when the limit is reached. Existing session
-traffic refreshes its idle deadline, and inactive sessions are closed after
-`AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`.
+sessions, including pending initialization, count toward
+`AFFINE_MCP_HTTP_MAX_SESSIONS` (default `32`). New sessions receive a
+`503` response with `Retry-After` and JSON-RPC error `-32002` when the limit is
+reached. The message reports occupied slots against the configured maximum,
+with separate established and initializing session counts. Established sessions
+include idle sessions; this is a session limit, not a concurrent request limit.
+Existing session traffic refreshes its idle deadline, and inactive sessions are closed after
+`AFFINE_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` (default `1800000`, or 30 minutes).
+
+For short-lived Streamable HTTP clients such as cron jobs, send `DELETE /mcp`
+with the session's `Mcp-Session-Id` and authentication headers when work finishes,
+including error cleanup. Closing the client process or an HTTP connection alone
+does not terminate its server-side session. Legacy SSE sessions are released
+when their SSE connection closes.
+
+If capacity errors occur, check that clients terminate or reuse their sessions
+and that the idle timeout matches their usage. Long idle timeouts allow abandoned
+sessions to accumulate. Increase `AFFINE_MCP_HTTP_MAX_SESSIONS` only when the
+expected concurrent session count and available memory justify it; a higher cap
+does not replace client cleanup.
 
 On `SIGINT` or `SIGTERM`, the server stops accepting connections and closes MCP
 transports concurrently. If a connection prevents graceful shutdown beyond
 `AFFINE_MCP_HTTP_SHUTDOWN_TIMEOUT_MS`, the remaining HTTP connections are
 forcibly closed. Invalid runtime limit values and listen errors fail startup
 instead of leaving a partially running process.
+
+### Concurrent writes
+
+Run one HTTP MCP server and point every writing client at that listener. Clients
+that require stdio can each run the existing `affine-mcp-http-proxy` bridge; see
+[client setup](client-setup.md#reuse-a-local-http-listener-from-stdio-clients).
+All sessions in that server share a FIFO queue per AFFiNE workspace. The queue
+covers the entire tool operation, including loading snapshots, validation,
+workspace metadata changes, and persistence. `read_doc` uses the same queue so
+its content and revision follow earlier coordinated writes. Different
+workspaces can run concurrently.
+
+This boundary is one MCP server process. Separate full stdio servers, multiple
+HTTP replicas, and the native AFFiNE editor do not share this queue. Route all
+coordinated writers through one listener; session affinity alone is insufficient
+when writers for a workspace can reach different replicas. Yjs still merges
+external updates, but the upstream push API provides no compare-and-swap or
+cross-process isolation. Composite operations are serialized, not database
+transactions: existing partial/uncertain-write responses still apply.
+
+For edits derived from a previous read, pass `read_doc.revision` as
+`expectedRevision` on a document content mutation, such as block, table,
+database, mindmap, title, Markdown, or document deletion tools. Supported tools
+advertise the optional field in `tools/list`:
+
+```json
+{
+  "name": "update_block",
+  "arguments": {
+    "workspaceId": "workspace-id",
+    "docId": "document-id",
+    "blockId": "paragraph-id",
+    "text": "Revised text",
+    "expectedRevision": "<64-character revision returned by read_doc>"
+  }
+}
+```
+
+The comparison occurs inside the workspace queue before the tool runs. A
+mismatch returns `isError: true`, code `STALE_DOCUMENT_REVISION`, and
+`retryable: false`, with the expected/current revision in `details`. Read again
+and reconcile the edit before resubmitting. The token covers the primary
+document's full Yjs state, including deletions, and its presence in the workspace
+document registry. Removing that entry invalidates old tokens even if AFFiNE
+retains the deleted content snapshot. The token does not cover workspace
+tags, folders, collections, or other documents touched by a composite tool.
+Workspace metadata, comments, custom properties, publication, and document
+hierarchy tools are still serialized but do not advertise this content token.
+It is a content precondition within the shared server, not upstream CAS.
+Without `expectedRevision`, explicit replacements apply in queue order and a
+later replacement can intentionally supersede earlier text. A missing document
+has `revision: null` and cannot satisfy a supplied revision.
+
+The queue permits at most 100 waiting calls per workspace and waits at most
+60 seconds before execution starts. Queue overflow or timeout reports a
+structured error without invoking the tool. Cancellation removes a waiting
+call; an already executing call retains its slot until it settles, even if its
+caller disconnects. If an active request loses its response, read back before
+retrying because persistence may already have succeeded.
 
 ### Bearer mode
 
@@ -195,6 +329,38 @@ export AFFINE_MCP_HTTP_TOKEN="your-super-secret-token"
 export PORT=3000
 
 npm run start:http
+```
+
+### Private stdio bridge for a local HTTP listener
+
+When a managed host already runs the HTTP transport, use
+`affine-mcp-http-proxy` for a local stdio client instead of starting another
+full MCP server process. The bridge forwards one stdio session to the existing
+loopback `/mcp` listener and sends `DELETE /mcp` when stdin closes.
+
+It requires `AFFINE_MCP_HTTP_TOKEN` in its inherited environment. Keep that
+token in the host/container environment: do not put it in a command line or
+copy it to the client. `AFFINE_MCP_HTTP_PROXY_URL` defaults to
+`http://127.0.0.1:${PORT:-3000}/mcp` and accepts loopback URLs only.
+
+The default HTTP connection assumes a trusted host or container where untrusted
+processes cannot replace the listener or claim its port. Loopback limits network
+reachability; it does not authenticate the listener to the bridge. On a shared
+host with untrusted processes, use an `https://` loopback endpoint with a trusted
+certificate and an authenticated TLS terminator, or isolate the bridge and
+listener together. Do not disable TLS certificate verification.
+
+The bridge reinitializes an expired HTTP session only when the listener explicitly
+rejects its session ID before dispatch. It never retries an ambiguous request
+after a network failure or timeout, which avoids duplicating document writes.
+Email/password login failures can recover on a later request after a five-second
+cooldown; concurrent sessions share the same login attempt.
+Sessions established with email/password renew before cookie expiry, or after
+twelve hours when the server omits an expiry. Explicit cookies and bearer tokens
+remain managed by the caller.
+
+```bash
+affine-mcp-http-proxy
 ```
 
 Use bearer mode when:
@@ -272,6 +438,8 @@ Available profiles:
 - `read_only`: expose discovery, reading, export, fidelity, and inspection tools, plus `sign_in`
 - `core`: expose the compact everyday surface for workspace/doc discovery, basic document authoring, tags, and database row/schema edits; omits admin tools, cleanup tools, experimental organize tools, and destructive tools
 - `authoring`: expose non-destructive creation and editing tools, including semantic pages, native templates, database composition, and edgeless canvas authoring; omits admin, cleanup, destructive, and experimental organize tools
+
+`replace_doc_with_markdown` removes the existing main-note content and is classified as destructive. It is available in `full`, but excluded from `core`, `authoring`, and deployments with `AFFINE_DISABLED_GROUPS=destructive`. Use `append_markdown` or `update_block` for incremental edits in those profiles.
 
 Profile, group, and tool names are validated at startup. An unknown value stops the server instead of falling back to a broader tool surface. This prevents a configuration typo from silently enabling tools that an operator intended to hide.
 
@@ -371,7 +539,7 @@ Before exposing the server remotely, confirm:
 - Browser CORS failures: verify `AFFINE_MCP_HTTP_ALLOWED_ORIGINS`
 - OAuth failures: verify issuer discovery metadata and JWKS availability
 - Custom GraphQL deployments: run `affine-mcp show-config --json` and confirm `graphqlEndpoint`, then run `affine-mcp doctor --json`
-- `doctor` also rejects an unprotected non-loopback HTTP bind and validates OAuth transport, discovery metadata, and JWKS reachability
+- `doctor` also checks selected-workspace membership, realtime root access, effective tool filters, rejects an unprotected non-loopback HTTP bind, and validates OAuth transport, discovery metadata, and JWKS reachability
 - Invalid transport, port, origin, or boolean values now fail at startup instead of silently falling back
 - Remote plain-HTTP AFFiNE URL rejected: use HTTPS, or set `AFFINE_ALLOW_INSECURE_HTTP=true` only for a trusted private network
 - Non-loopback bearer listener rejected: set `AFFINE_MCP_HTTP_TOKEN` or configure OAuth

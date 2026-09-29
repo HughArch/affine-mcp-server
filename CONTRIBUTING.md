@@ -5,6 +5,7 @@ Thanks for contributing to `affine-mcp-server`.
 ## Before You Start
 
 - Node.js `20+` is required. Use the version in `.nvmrc` for local development.
+- Python 3 is required for the real-terminal CLI regression test on macOS and Linux; it uses only the standard library. This is a test prerequisite, not a server runtime dependency.
 - You need one AFFiNE instance to run end-to-end checks.
 - Read the project docs first:
   - `README.md`
@@ -51,6 +52,8 @@ Live integration tests create, update, and delete AFFiNE resources. They are
 allowed against loopback targets by default and fail closed for every other
 host. The Docker-backed runners use a unique Compose project, private random
 credentials, and collision-resistant resource names for each run.
+They disable rate limiting and the new-account share delay in that disposable
+AFFiNE instance so repeated test logins and sharing checks can complete.
 
 Use `npm run test:live-safety` to verify the guard without contacting AFFiNE.
 Never point a live test at production. If a non-loopback disposable test

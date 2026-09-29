@@ -2,6 +2,8 @@ import { fetch } from "undici";
 
 import type { AuthSnapshot } from "./authSession.js";
 import { VERSION, AFFINE_CLIENT_VERSION } from "./config.js";
+import { fetchResponseBody } from "./util/httpResponse.js";
+import { ToolFailure } from "./util/mcp.js";
 
 const GQL_FETCH_TIMEOUT_MS = 30_000;
 
@@ -14,6 +16,7 @@ export type ConnectionAuth = {
 
 type GraphQLClientOptions = {
   authProvider?: () => Promise<AuthSnapshot>;
+  baseUrl?: string;
   bearer?: string;
   endpoint: string;
   headers?: Record<string, string>;
@@ -109,6 +112,11 @@ export class GraphQLClient {
     return this.opts.endpoint;
   }
 
+  /** Browser-facing AFFiNE URL, independent of its configurable GraphQL route. */
+  get baseUrl(): string {
+    return (this.opts.baseUrl || new URL(this.opts.endpoint).origin).replace(/\/+$/, "");
+  }
+
   /**
    * Build the outgoing header set for a snapshot. `x-affine-version` goes first
    * so an explicit override in `baseHeaders` (from `AFFINE_HEADERS_JSON`) wins,
@@ -178,6 +186,10 @@ export class GraphQLClient {
           this.resolvedAuth = provided;
         }
         return this.resolvedAuth;
+      }).finally(() => {
+        // AuthSession owns caching/recovery. Do not pin a rejected or stale
+        // provider promise to an otherwise long-lived MCP transport session.
+        this.authResolution = undefined;
       });
     }
     return this.authResolution;
@@ -205,24 +217,15 @@ export class GraphQLClient {
       ...connection.headers,
     };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GQL_FETCH_TIMEOUT_MS);
-    let res;
-    try {
-      res = await fetch(this.opts.endpoint, {
+    const { response: res, body } = await fetchResponseBody(
+      signal => fetch(this.opts.endpoint, {
         method: "POST",
         headers,
         body: JSON.stringify({ query, variables }),
-        signal: controller.signal,
-      });
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        throw new Error(`GraphQL request timed out after ${GQL_FETCH_TIMEOUT_MS / 1000}s`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+        signal,
+      }),
+      { label: "GraphQL request", timeoutMs: GQL_FETCH_TIMEOUT_MS },
+    );
 
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
@@ -233,8 +236,26 @@ export class GraphQLClient {
     }
 
     const contentType = res.headers.get("content-type") || "";
-    if (!contentType.includes("application/json") && !contentType.includes("application/graphql")) {
-      const body = await res.text();
+    const normalizedContentType = contentType.toLowerCase();
+    const isJsonResponse = normalizedContentType.includes("application/json") || normalizedContentType.includes("application/graphql");
+
+    if (!res.ok) {
+      let detail = body;
+      if (isJsonResponse) {
+        try {
+          const json = JSON.parse(body) as any;
+          detail = json.errors?.map((e: any) => e.message).join("; ") || JSON.stringify(json);
+        } catch {}
+      }
+      const message = `GraphQL HTTP ${res.status}: ${sanitizeErrorBody(detail)}`;
+      if (res.status === 401) throw new ToolFailure(message, "auth_required");
+      if (res.status === 403) throw new ToolFailure(message, "access_denied");
+      if (res.status === 429) throw new ToolFailure(message, "rate_limited");
+      if (res.status >= 500) throw new ToolFailure(message, "upstream_unavailable");
+      throw new Error(message);
+    }
+
+    if (!isJsonResponse) {
       const snippet = sanitizeErrorBody(body);
       throw new Error(
         `GraphQL endpoint returned non-JSON response (${res.status} ${res.statusText}, ` +
@@ -242,21 +263,23 @@ export class GraphQLClient {
       );
     }
 
-    if (!res.ok) {
-      let body: string;
-      try {
-        const json = await res.json() as any;
-        body = json.errors?.map((e: any) => e.message).join("; ") || JSON.stringify(json);
-      } catch {
-        body = await res.text().catch(() => "(unreadable body)");
-      }
-      throw new Error(`GraphQL HTTP ${res.status}: ${sanitizeErrorBody(body)}`);
+    let json: any;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      throw new Error("GraphQL endpoint returned invalid JSON.");
     }
-
-    const json = await res.json() as any;
     if (json.errors) {
       const msg = json.errors.map((e: any) => e.message).join("; ");
-      throw new Error(`GraphQL error: ${sanitizeErrorBody(msg)}`);
+      const codes = json.errors.map((e: any) => e.extensions?.code || e.extensions?.name || e.name || "").join(" ");
+      const message = `GraphQL error: ${sanitizeErrorBody(msg)}`;
+      if (/UNAUTHENTICATED|AUTHENTICATION_REQUIRED|SESSION_EXPIRED|INVALID_TOKEN/i.test(codes)) {
+        throw new ToolFailure(message, "auth_required");
+      }
+      if (/FORBIDDEN|ACCESS_DENIED|PERMISSION_DENIED/i.test(codes)) {
+        throw new ToolFailure(message, "access_denied");
+      }
+      throw new Error(message);
     }
     return json.data as T;
   }

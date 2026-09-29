@@ -1,7 +1,8 @@
-const ALL_TOOLS = [
+export const ALL_TOOLS = [
   "add_database_column",
   "add_database_row",
   "add_doc_to_collection",
+  "add_mindmap_node",
   "add_organize_link",
   "add_surface_element",
   "add_tag_to_doc",
@@ -18,6 +19,7 @@ const ALL_TOOLS = [
   "create_doc",
   "create_doc_from_markdown",
   "create_folder",
+  "create_mindmap",
   "create_semantic_page",
   "create_tag",
   "create_workspace",
@@ -45,6 +47,7 @@ const ALL_TOOLS = [
   "get_doc_icon",
   "get_edgeless_canvas",
   "get_folder_icon",
+  "get_mindmap",
   "get_orphan_docs",
   "get_workspace",
   "inspect_template_structure",
@@ -62,6 +65,7 @@ const ALL_TOOLS = [
   "list_tags",
   "list_workspace_tree",
   "list_workspaces",
+  "move_block",
   "move_doc",
   "move_organize_node",
   "publish_doc",
@@ -72,12 +76,18 @@ const ALL_TOOLS = [
   "remove_doc_from_collection",
   "remove_tag_from_doc",
   "rename_folder",
+  "reparent_mindmap_node",
   "replace_doc_with_markdown",
   "resolve_comment",
+  "restore_doc",
   "revoke_doc",
   "search_docs",
   "set_doc_property",
+  "set_mindmap_layout",
+  "set_mindmap_lock",
+  "set_mindmap_style",
   "sign_in",
+  "trash_doc",
   "update_block",
   "update_collection",
   "update_collection_rules",
@@ -88,14 +98,17 @@ const ALL_TOOLS = [
   "update_edgeless_block",
   "update_folder_icon",
   "update_frame_children",
+  "update_mindmap_node",
   "update_profile",
   "update_settings",
   "update_surface_element",
+  "update_table_cell",
+  "update_table_column_widths",
   "update_workspace",
   "upload_blob",
 ] as const;
 
-type ToolName = typeof ALL_TOOLS[number];
+export type ToolName = typeof ALL_TOOLS[number];
 type ToolProfile = "full" | "read_only" | "core" | "authoring";
 type ToolAnnotations = {
   readOnlyHint: boolean;
@@ -105,6 +118,14 @@ type ToolAnnotations = {
 };
 
 const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
+  add_mindmap_node: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  create_mindmap: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  get_mindmap: ["docs", "docs.edgeless", "docs.surface", "docs.read", "read"],
+  reparent_mindmap_node: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  set_mindmap_layout: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  set_mindmap_lock: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  set_mindmap_style: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  update_mindmap_node: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
   add_database_column: ["docs", "docs.database", "docs.write", "write"],
   add_database_row: ["docs", "docs.database", "docs.write", "write"],
   add_doc_to_collection: ["organize", "organize.collections", "organize.write", "write"],
@@ -168,6 +189,7 @@ const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
   list_tags: ["docs", "docs.tags", "docs.read", "read"],
   list_workspace_tree: ["docs", "docs.tree", "docs.read", "read"],
   list_workspaces: ["workspaces", "workspaces.read", "read"],
+  move_block: ["docs", "docs.write", "write"],
   move_doc: ["docs", "docs.tree", "docs.write", "write"],
   move_organize_node: ["organize", "organize.folders", "organize.write", "experimental", "write"],
   publish_doc: ["docs", "docs.share", "docs.write", "write"],
@@ -178,12 +200,14 @@ const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
   remove_doc_from_collection: ["organize", "organize.collections", "organize.write", "write"],
   remove_tag_from_doc: ["docs", "docs.tags", "docs.write", "write"],
   rename_folder: ["organize", "organize.folders", "organize.write", "experimental", "write"],
-  replace_doc_with_markdown: ["docs", "docs.markdown", "docs.write", "write"],
+  replace_doc_with_markdown: ["docs", "docs.markdown", "docs.write", "destructive", "write"],
   resolve_comment: ["comments", "comments.write", "write"],
+  restore_doc: ["docs", "docs.write", "write"],
   revoke_doc: ["docs", "docs.share", "docs.write", "destructive", "write"],
   search_docs: ["docs", "docs.read", "read"],
   set_doc_property: ["docs", "docs.properties", "docs.write", "write"],
   sign_in: ["users", "users.auth", "auth", "write"],
+  trash_doc: ["docs", "docs.write", "write"],
   update_block: ["docs", "docs.write", "write"],
   update_collection: ["organize", "organize.collections", "organize.write", "write"],
   update_collection_rules: ["organize", "organize.collections", "organize.write", "write"],
@@ -197,11 +221,14 @@ const TOOL_GROUPS: Record<ToolName, readonly string[]> = {
   update_profile: ["users", "users.write", "admin", "write"],
   update_settings: ["users", "users.write", "admin", "write"],
   update_surface_element: ["docs", "docs.edgeless", "docs.surface", "docs.write", "write"],
+  update_table_cell: ["docs", "docs.write", "write"],
+  update_table_column_widths: ["docs", "docs.write", "write"],
   update_workspace: ["workspaces", "workspaces.write", "admin", "write"],
   upload_blob: ["blobs", "blobs.write", "write"],
 };
 
 const READ_ONLY_TOOLS = new Set<ToolName>([
+  "get_mindmap",
   "analyze_doc_fidelity",
   "current_user",
   "export_doc_markdown",
@@ -257,16 +284,21 @@ const CORE_TOOLS = new Set<ToolName>([
   "list_docs_by_tag",
   "list_tags",
   "list_workspaces",
+  "move_block",
   "read_database_cells",
   "read_database_columns",
   "read_doc",
   "remove_tag_from_doc",
-  "replace_doc_with_markdown",
+  "restore_doc",
   "search_docs",
   "sign_in",
+  "trash_doc",
+  "update_block",
   "update_database_row",
   "update_doc_icon",
   "update_doc_title",
+  "update_table_cell",
+  "update_table_column_widths",
 ]);
 
 const AUTHORING_EXCLUDED_GROUPS = new Set([
@@ -274,6 +306,11 @@ const AUTHORING_EXCLUDED_GROUPS = new Set([
   "cleanup",
   "destructive",
   "experimental",
+]);
+
+const IDEMPOTENT_WRITE_TOOLS = new Set<ToolName>([
+  "restore_doc",
+  "trash_doc",
 ]);
 
 const KNOWN_PROFILES = new Set<ToolProfile>(["full", "read_only", "core", "authoring"]);
@@ -407,7 +444,7 @@ export function toolAnnotationsFor(name: string): ToolAnnotations {
   return {
     readOnlyHint: isReadOnly,
     destructiveHint: isDestructive,
-    idempotentHint: isReadOnly,
+    idempotentHint: isReadOnly || IDEMPOTENT_WRITE_TOOLS.has(toolName),
     openWorldHint: true,
   };
 }

@@ -75,7 +75,7 @@ docker_diagnostics() {
   echo "=== Docker diagnostics (on failure) ==="
   compose ps || true
   echo ""
-  compose logs --no-color --tail=200 affine affine_migration postgres redis || true
+  compose logs --no-color --tail=200 affine affine_gateway affine_migration postgres redis || true
 }
 
 docker_compose_with_retry() {
@@ -193,7 +193,7 @@ start_docker_stack() {
   docker_compose_with_retry "migration startup" up -d --no-deps affine_migration
   wait_for_container_exit_zero affine_migration 45 2
 
-  docker_compose_with_retry "app startup" up -d --no-deps affine
+  docker_compose_with_retry "app startup" up -d --no-deps affine affine_gateway
   wait_for_container_running affine 45 2
 }
 
@@ -204,9 +204,9 @@ acquire_credentials_with_retry() {
   for ((attempt = 1; attempt <= AFFINE_CREDENTIAL_ACQUIRE_RETRIES; attempt++)); do
     if node "$SCRIPT_DIR/acquire-credentials.mjs"; then
       return 0
+    else
+      exit_code=$?
     fi
-
-    exit_code=$?
     echo "[e2e] Credential acquisition failed (attempt ${attempt}/${AFFINE_CREDENTIAL_ACQUIRE_RETRIES}, exit ${exit_code})"
     docker_diagnostics
 
@@ -276,7 +276,7 @@ ensure_affine_ui_ready() {
   echo "[e2e] AFFiNE UI is not reachable before Playwright; attempting service recovery..."
   docker_diagnostics
 
-  compose up -d --no-deps affine
+  compose up -d --no-deps affine affine_gateway
   acquire_credentials_with_retry
   wait_for_auth_ready
 }
@@ -295,6 +295,10 @@ acquire_credentials_with_retry
 echo ""
 echo "=== Verifying AFFiNE auth readiness ==="
 wait_for_auth_ready
+
+# Repeated test logins must not exhaust the disposable backend's rate limit.
+echo "=== Configuring isolated AFFiNE test instance ==="
+node "$SCRIPT_DIR/configure-test-instance.mjs"
 
 # --- Step 3: Build MCP server ---
 echo ""

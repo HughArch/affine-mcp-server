@@ -11,6 +11,8 @@ Permanent destructive tools require callers to repeat the target identifier so a
 
 Read or list the target immediately before deletion and never reuse a confirmation value for a different resource.
 
+Prefer `trash_doc` for ordinary cleanup because it is recoverable with `restore_doc`. Use `delete_doc` only when permanent deletion is explicitly required.
+
 This guide shows practical tool sequences for common AFFiNE workflows.
 
 The exact JSON schema for each tool is discoverable from MCP `tools/list`. The recipes below focus on tool selection and ordering.
@@ -42,7 +44,7 @@ Use when:
 Typical tool sequence:
 
 1. `search_docs` to find the parent
-2. `create_doc` or `create_doc_from_markdown`
+2. `create_doc` for one plain paragraph, or `create_doc_from_markdown` for formatted content; pass `folderId` to either tool for organize-folder placement
 3. `move_doc` if you created the doc before deciding its final parent
 4. `list_children` to verify placement
 
