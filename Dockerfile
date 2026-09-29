@@ -47,6 +47,8 @@ ENV MCP_TRANSPORT=http \
     AFFINE_EXPORT_DIR=/affine-backup
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:${PORT}/healthz || exit 1
+    # 用 127.0.0.1 而非 localhost: busybox wget 会先试 IPv6 ::1,
+    # 而 node 服务只绑定 IPv4 0.0.0.0,导致健康检查 connection refused
+    CMD wget -qO- http://127.0.0.1:${PORT}/healthz || exit 1
 
 ENTRYPOINT ["node", "bin/affine-mcp"]
