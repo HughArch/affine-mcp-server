@@ -10594,6 +10594,115 @@ export function registerDocTools(
     }
   };
 
+  type TableCellValue = string | { text?: string; deltas?: TextDelta[] };
+  type TableCellFormat = {
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
+    code?: boolean;
+    color?: string;
+    background?: string;
+  };
+  type TableUpdateInput = {
+    // Keys use 'rowIndex:columnIndex' (0-based).
+    cells?: Record<string, TableCellValue>;
+    columnWidths?: Record<string, number>;
+    rowHeights?: Record<string, number>;
+    rowBackgrounds?: Record<string, string>;
+    columnBackgrounds?: Record<string, string>;
+    cellFormats?: Record<string, TableCellFormat>;
+  };
+
+  // Column widths are clamped to [ColumnMinWidth, ColumnMaxWidth] = [60, 240]
+  // px, mirroring blocksuite/affine/blocks/table/src/consts.ts. Row heights are
+  // not stored by AFFiNE (pure CSS layout), so rowHeights is accepted but
+  // reported under `ignored`.
+
+  // Resolve ordered row/column ids for an affine:table block, supporting both
+  // the nested Y.Map layout and the flat dot-notation layout that extractTableData
+  // already handles.
+  function readTableRowColumnIds(block: Y.Map<any>): { rows: string[]; columns: string[] } {
+    const compareOrder = (left: string, right: string) => {
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    };
+    let rowEntries = mapEntries(block.get("prop:rows"))
+      .map(([rowId, payload]) => ({
+        rowId,
+        order:
+          payload && typeof payload === "object" && typeof (payload as any).order === "string"
+            ? (payload as any).order
+            : rowId,
+      }))
+      .sort((a, b) => compareOrder(a.order, b.order));
+    let columnEntries = mapEntries(block.get("prop:columns"))
+      .map(([columnId, payload]) => ({
+        columnId,
+        order:
+          payload && typeof payload === "object" && typeof (payload as any).order === "string"
+            ? (payload as any).order
+            : columnId,
+      }))
+      .sort((a, b) => compareOrder(a.order, b.order));
+
+    if (rowEntries.length === 0 || columnEntries.length === 0) {
+      const flatRows = new Map<string, string>();
+      const flatColumns = new Map<string, string>();
+      block.forEach((value: unknown, key: string) => {
+        const rowMatch = key.match(/^prop:rows\.([^.]+)\.order$/);
+        if (rowMatch) {
+          flatRows.set(rowMatch[1], typeof value === "string" ? value : rowMatch[1]);
+          return;
+        }
+        const colMatch = key.match(/^prop:columns\.([^.]+)\.order$/);
+        if (colMatch) {
+          flatColumns.set(colMatch[1], typeof value === "string" ? value : colMatch[1]);
+        }
+      });
+      if (flatRows.size > 0 && flatColumns.size > 0) {
+        rowEntries = Array.from(flatRows.entries())
+          .map(([rowId, order]) => ({ rowId, order }))
+          .sort((a, b) => compareOrder(a.order, b.order));
+        columnEntries = Array.from(flatColumns.entries())
+          .map(([columnId, order]) => ({ columnId, order }))
+          .sort((a, b) => compareOrder(a.order, b.order));
+      }
+    }
+    return { rows: rowEntries.map(entry => entry.rowId), columns: columnEntries.map(entry => entry.columnId) };
+  }
+
+  const TABLE_CELL_KEY_PATTERN = /^(\d+):(\d+)$/;
+  const applyTableCellFormats = (block: Y.Map<any>, rowId: string, columnId: string, format: TableCellFormat): void => {
+    const cellKey = `prop:cells.${rowId}:${columnId}.text`;
+    const existing = block.get(cellKey);
+    const deltas: TextDelta[] = existing instanceof Y.Text ? (existing.toDelta() as TextDelta[]) : [];
+    const base = deltas.length > 0 ? deltas : [{ insert: "" }];
+    const specs: Array<[string, unknown]> = [
+      ["bold", format.bold],
+      ["italic", format.italic],
+      ["underline", format.underline],
+      ["strike", format.strike],
+      ["code", format.code],
+      ["color", format.color],
+      ["background", format.background],
+    ];
+    const updated = base.map(delta => {
+      const attributes: Record<string, unknown> = { ...(delta.attributes || {}) };
+      for (const [attrName, value] of specs) {
+        if (value === undefined) continue;
+        if (value === false || (typeof value === "string" && value.trim().length === 0)) {
+          delete attributes[attrName];
+        } else {
+          attributes[attrName] = value === true ? true : (value as string).trim();
+        }
+      }
+      return { insert: delta.insert, attributes };
+    });
+    block.set(cellKey, makeText(updated));
+  };
+
   const updateBlockHandler = async (params: {
     workspaceId?: string;
     docId: string;
@@ -10603,6 +10712,7 @@ export function registerDocTools(
     type?: BlockEditType;
     style?: AppendBlockListStyle;
     level?: number;
+    table?: TableUpdateInput;
   }) => {
     const workspaceId = params.workspaceId || defaults.workspaceId;
     if (!workspaceId) {
@@ -10615,9 +10725,10 @@ export function registerDocTools(
       params.checked === undefined &&
       params.type === undefined &&
       params.style === undefined &&
-      params.level === undefined
+      params.level === undefined &&
+      params.table === undefined
     ) {
-      throw new Error("update_block requires at least one of text, checked, type, style, or level.");
+      throw new Error("update_block requires at least one of text, checked, type, style, level, or table.");
     }
 
     const { endpoint, cookie, bearer } = await getCookieAndEndpoint();
@@ -10638,83 +10749,188 @@ export function registerDocTools(
         throw new Error(`Block '${params.blockId}' not found.`);
       }
 
+      const blockFlavour = String(block.get("sys:flavour"));
       const currentType = editableBlockType(block);
-      if (!currentType) {
+      if (!currentType && !(blockFlavour === "affine:table" && params.table !== undefined)) {
         throw new Error(
-          `Block '${params.blockId}' has flavour '${String(block.get("sys:flavour"))}' — update_block supports paragraph, heading, quote, list, and code blocks.`
+          `Block '${params.blockId}' has flavour '${blockFlavour}' — update_block supports paragraph, heading, quote, list, and code blocks, or affine:table via the 'table' parameter.`
         );
-      }
-      const requestedType = params.type ?? currentType;
-      const paragraphTypes = new Set<BlockEditType>(["paragraph", "heading", "quote"]);
-      const sameFlavour =
-        (paragraphTypes.has(currentType) && paragraphTypes.has(requestedType)) ||
-        currentType === requestedType;
-      if (!sameFlavour) {
-        throw new Error(
-          `Cannot change block '${params.blockId}' from '${currentType}' to '${requestedType}' while preserving its id. Only paragraph/heading/quote conversions share one AFFiNE block flavour.`
-        );
-      }
-
-      if (params.style !== undefined && requestedType !== "list") {
-        throw new Error("The 'style' field can only be used with type='list'.");
-      }
-      if (params.level !== undefined && requestedType !== "heading") {
-        throw new Error("The 'level' field can only be used with type='heading'.");
-      }
-      if (params.checked !== undefined && requestedType !== "list") {
-        throw new Error("The 'checked' field can only be used with a todo list block.");
       }
 
       const previous = blockSnapshot(blocks, params.blockId);
       const changed: string[] = [];
+      const ignored: string[] = [];
       const markChanged = (field: string) => {
         if (!changed.includes(field)) changed.push(field);
       };
 
-      if (paragraphTypes.has(requestedType)) {
-        const rawType = block.get("prop:type");
-        const currentHeadingLevel =
-          typeof rawType === "string" && /^h([1-6])$/.test(rawType)
-            ? Number(rawType.slice(1))
-            : 1;
-        const nextRawType = requestedType === "heading"
-          ? `h${params.level ?? currentHeadingLevel}`
-          : requestedType === "quote"
-            ? "quote"
-            : "text";
-        if (rawType !== nextRawType) {
-          block.set("prop:type", nextRawType);
-          markChanged(params.level !== undefined && requestedType === currentType ? "level" : "type");
+      if (currentType) {
+        const requestedType = params.type ?? currentType;
+        const paragraphTypes = new Set<BlockEditType>(["paragraph", "heading", "quote"]);
+        const sameFlavour =
+          (paragraphTypes.has(currentType) && paragraphTypes.has(requestedType)) ||
+          currentType === requestedType;
+        if (!sameFlavour) {
+          throw new Error(
+            `Cannot change block '${params.blockId}' from '${currentType}' to '${requestedType}' while preserving its id. Only paragraph/heading/quote conversions share one AFFiNE block flavour.`
+          );
         }
-      } else if (requestedType === "list") {
-        const rawStyle = block.get("prop:type");
-        const currentStyle = (APPEND_BLOCK_LIST_STYLE_VALUES as readonly string[]).includes(rawStyle)
-          ? rawStyle as AppendBlockListStyle
-          : "bulleted";
-        const nextStyle = params.style ?? currentStyle;
-        if (rawStyle !== nextStyle) {
-          block.set("prop:type", nextStyle);
-          markChanged("style");
+
+        if (params.style !== undefined && requestedType !== "list") {
+          throw new Error("The 'style' field can only be used with type='list'.");
         }
-        if (params.checked !== undefined) {
-          if (nextStyle !== "todo") {
-            throw new Error("The 'checked' field can only be used when list style is 'todo'.");
+        if (params.level !== undefined && requestedType !== "heading") {
+          throw new Error("The 'level' field can only be used with type='heading'.");
+        }
+        if (params.checked !== undefined && requestedType !== "list") {
+          throw new Error("The 'checked' field can only be used with a todo list block.");
+        }
+
+        if (paragraphTypes.has(requestedType)) {
+          const rawType = block.get("prop:type");
+          const currentHeadingLevel =
+            typeof rawType === "string" && /^h([1-6])$/.test(rawType)
+              ? Number(rawType.slice(1))
+              : 1;
+          const nextRawType = requestedType === "heading"
+            ? `h${params.level ?? currentHeadingLevel}`
+            : requestedType === "quote"
+              ? "quote"
+              : "text";
+          if (rawType !== nextRawType) {
+            block.set("prop:type", nextRawType);
+            markChanged(params.level !== undefined && requestedType === currentType ? "level" : "type");
           }
-          if (block.get("prop:checked") !== params.checked) {
-            block.set("prop:checked", params.checked);
-            markChanged("checked");
+        } else if (requestedType === "list") {
+          const rawStyle = block.get("prop:type");
+          const currentStyle = (APPEND_BLOCK_LIST_STYLE_VALUES as readonly string[]).includes(rawStyle)
+            ? rawStyle as AppendBlockListStyle
+            : "bulleted";
+          const nextStyle = params.style ?? currentStyle;
+          if (rawStyle !== nextStyle) {
+            block.set("prop:type", nextStyle);
+            markChanged("style");
+          }
+          if (params.checked !== undefined) {
+            if (nextStyle !== "todo") {
+              throw new Error("The 'checked' field can only be used when list style is 'todo'.");
+            }
+            if (block.get("prop:checked") !== params.checked) {
+              block.set("prop:checked", params.checked);
+              markChanged("checked");
+            }
+          }
+        }
+
+        if (params.text !== undefined) {
+          const rawText = block.get("prop:text");
+          const textMatches = typeof params.text === "string"
+            ? asText(rawText) === params.text
+            : isDeepStrictEqual(richTextValueToDeltas(rawText) ?? [], canonicalTextDeltas(params.text));
+          if (!textMatches) {
+            block.set("prop:text", makeText(params.text));
+            markChanged("text");
           }
         }
       }
 
-      if (params.text !== undefined) {
-        const rawText = block.get("prop:text");
-        const textMatches = typeof params.text === "string"
-          ? asText(rawText) === params.text
-          : isDeepStrictEqual(richTextValueToDeltas(rawText) ?? [], canonicalTextDeltas(params.text));
-        if (!textMatches) {
-          block.set("prop:text", makeText(params.text));
-          markChanged("text");
+      // Structured table edits (affine:table only). Cell keys use 0-based
+      // 'rowIndex:columnIndex' (e.g. '0:1' = first row, second column).
+      if (params.table !== undefined) {
+        if (blockFlavour === "affine:table") {
+          const { rows, columns } = readTableRowColumnIds(block);
+          const table = params.table;
+
+          const resolveRow = (key: string, indexText: string): string => {
+            const rowId = rows[Number(indexText)];
+            if (!rowId) {
+              throw new Error(`Table ${key} row index '${indexText}' out of bounds (table has ${rows.length} rows).`);
+            }
+            return rowId;
+          };
+          const resolveColumn = (key: string, indexText: string): string => {
+            const columnId = columns[Number(indexText)];
+            if (!columnId) {
+              throw new Error(`Table ${key} column index '${indexText}' out of bounds (table has ${columns.length} columns).`);
+            }
+            return columnId;
+          };
+
+          if (table.cells) {
+            for (const [key, value] of Object.entries(table.cells)) {
+              const match = TABLE_CELL_KEY_PATTERN.exec(key);
+              if (!match) {
+                throw new Error(`Invalid table cell key '${key}'. Use 'rowIndex:columnIndex' (0-based), e.g. '0:1'.`);
+              }
+              const rowId = resolveRow(key, match[1]);
+              const columnId = resolveColumn(key, match[2]);
+              if (typeof value === "string") {
+                block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value));
+              } else if (value && typeof value === "object") {
+                if (value.deltas) {
+                  block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value.deltas));
+                } else {
+                  block.set(`prop:cells.${rowId}:${columnId}.text`, makeText(value.text ?? ""));
+                }
+              }
+              markChanged("table");
+            }
+          }
+
+          if (table.columnWidths) {
+            for (const [indexText, width] of Object.entries(table.columnWidths)) {
+              const columnId = resolveColumn("columnWidths", indexText);
+              // AFFiNE clamps column widths to [60, 240] px (see
+              // blocksuite/affine/blocks/table/src/consts.ts).
+              block.set(`prop:columns.${columnId}.width`, Math.min(240, Math.max(60, Math.floor(width))));
+              markChanged("table");
+            }
+          }
+
+          if (table.rowHeights) {
+            // AFFiNE tables have no per-row height storage: row height is pure
+            // CSS layout (DefaultRowHeight = 39px in table/src/consts.ts).
+            // Report the unsupported field under `ignored` instead of writing a
+            // key AFFiNE never reads.
+            for (const indexText of Object.keys(table.rowHeights)) {
+              ignored.push(`table.rowHeights[${indexText}]`);
+            }
+          }
+
+          if (table.rowBackgrounds) {
+            for (const [indexText, color] of Object.entries(table.rowBackgrounds)) {
+              const rowId = resolveRow("rowBackgrounds", indexText);
+              // AFFiNE stores row background on the row itself
+              // (TableRow.backgroundColor, see affine/model/src/blocks/table/table-model.ts).
+              block.set(`prop:rows.${rowId}.backgroundColor`, color);
+              markChanged("table");
+            }
+          }
+
+          if (table.columnBackgrounds) {
+            for (const [indexText, color] of Object.entries(table.columnBackgrounds)) {
+              const columnId = resolveColumn("columnBackgrounds", indexText);
+              // AFFiNE stores column background on the column itself
+              // (TableColumn.backgroundColor, see table-model.ts).
+              block.set(`prop:columns.${columnId}.backgroundColor`, color);
+              markChanged("table");
+            }
+          }
+
+          if (table.cellFormats) {
+            for (const [key, format] of Object.entries(table.cellFormats)) {
+              const match = TABLE_CELL_KEY_PATTERN.exec(key);
+              if (!match) {
+                throw new Error(`Invalid table cell key '${key}'. Use 'rowIndex:columnIndex' (0-based), e.g. '0:1'.`);
+              }
+              const rowId = resolveRow(key, match[1]);
+              const columnId = resolveColumn(key, match[2]);
+              applyTableCellFormats(block, rowId, columnId, format);
+              markChanged("table");
+            }
+          }
+        } else {
+          ignored.push("table");
         }
       }
 
@@ -10732,6 +10948,7 @@ export function registerDocTools(
         updated: changed.length > 0,
         blockId: params.blockId,
         changed,
+        ignored,
         previous,
         block: blockSnapshot(blocks, params.blockId),
       });
@@ -11641,7 +11858,7 @@ export function registerDocTools(
     {
       title: "Update Block",
       description:
-        "Partially update one paragraph, heading, quote, list, or code block while preserving its block id. Omitted fields remain unchanged. Paragraph/heading/quote conversions preserve ids; cross-flavour conversions are rejected.",
+        "Partially update one paragraph, heading, quote, list, code, or table block while preserving its block id. Omitted fields remain unchanged. Paragraph/heading/quote conversions preserve ids; cross-flavour conversions are rejected. Text-bearing blocks accept text/deltas; affine:table blocks accept the structured 'table' object (cell contents, column widths clamped to 60-240 px, row/column background colors, per-cell text formats; row heights are not supported by AFFiNE and are reported under 'ignored'). Fields that don't apply to the block's flavour come back under 'ignored'.",
       inputSchema: {
         workspaceId: WorkspaceId.optional(),
         docId: DocId,
@@ -11651,6 +11868,25 @@ export function registerDocTools(
         type: BlockEditType.optional().describe("Resulting logical block type."),
         style: AppendBlockListStyle.optional().describe("Resulting list style. Only valid for list blocks."),
         level: z.number().int().min(1).max(6).optional().describe("Heading level. Only valid when the resulting type is heading."),
+        table: z.object({
+          cells: z.record(z.union([z.string(), z.object({
+            text: z.string().optional(),
+            deltas: z.array(z.object({ insert: z.string(), attributes: z.record(z.unknown()).optional() })).optional(),
+          })])).optional().describe("Update cell contents. Keys are 0-based 'rowIndex:columnIndex' (e.g. '0:1'). Value is a plain string or {text} / {deltas}."),
+          columnWidths: z.record(z.number()).optional().describe("Set column widths in px. Keys are 0-based column indexes. Values are clamped to AFFiNE's [60, 240] px range."),
+          rowHeights: z.record(z.number()).optional().describe("NOT SUPPORTED by AFFiNE: row height is pure CSS layout and is not stored. Providing this field reports the keys under `ignored` and writes nothing."),
+          rowBackgrounds: z.record(z.string()).optional().describe("Set background color for a whole row (zebra stripes). Keys are 0-based row indexes; stored as TableRow.backgroundColor (a CSS color value)."),
+          columnBackgrounds: z.record(z.string()).optional().describe("Set background color for a whole column (e.g. header column). Keys are 0-based column indexes; stored as TableColumn.backgroundColor (a CSS color value)."),
+          cellFormats: z.record(z.object({
+            bold: z.boolean().optional(),
+            italic: z.boolean().optional(),
+            underline: z.boolean().optional(),
+            strike: z.boolean().optional(),
+            code: z.boolean().optional(),
+            color: z.string().optional(),
+            background: z.string().optional(),
+          })).optional().describe("Apply rich-text formats to a cell's text. Keys are 0-based 'rowIndex:columnIndex'. bold/italic/underline/strike/code are boolean (true=set, false=remove); color (text color) and background (text highlight) are strings (''=remove). Per-text formatting — NOT the same as row/column background colors."),
+        }).optional().describe("Table only. Structured edits for affine:table blocks: cell contents, column widths, row/column background colors (TableRow/TableColumn.backgroundColor), and per-cell text formats. Row heights are not supported by AFFiNE (pure CSS layout) and are reported under `ignored`."),
       },
     },
     updateBlockHandler as any

@@ -144,7 +144,7 @@ const OUTPUT_SPECS = {
   set_doc_property: spec({ workspaceId: "string", docId: "string", propertyId: "string", name: "string", type: "string", value: "unknown", stored: "unknown", updated: "boolean" }),
   sign_in: spec({ signedIn: "boolean" }),
   trash_doc: fallible(receipt({ status: "string", workspaceId: "string", docId: "string", title: "nullableString", changed: "boolean", previouslyInTrash: "boolean", inTrash: "boolean", trashDate: "nullableNumber", readBackVerified: "boolean" })),
-  update_block: spec({ updated: "boolean", blockId: "string", changed: "stringArray", previous: "object", block: "object" }),
+  update_block: spec({ updated: "boolean", blockId: "string", changed: "stringArray", ignored: "stringArray", previous: "object", block: "object" }),
   update_collection: spec({ id: "string", name: "string", rules: "object", allowList: "stringArray" }),
   update_collection_rules: spec({ workspaceId: "string", collectionId: "string", rules: "object", allowList: "stringArray", matchedDocIds: "stringArray", matchedCount: "number" }),
   update_comment: fallible(receipt({ commentId: "string", id: "string", success: "boolean" })),
