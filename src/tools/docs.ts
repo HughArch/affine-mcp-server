@@ -3737,6 +3737,8 @@ export function registerDocTools(
     rowIds: string[];
     columnIds: string[];
     columnWidths: Array<number | null>;
+    rowBackgrounds: Array<string | null>;
+    columnBackgrounds: Array<string | null>;
   } | null {
     const compareOrder = (left: string, right: string) => {
       if (left < right) return -1;
@@ -3863,12 +3865,27 @@ export function registerDocTools(
       tableCellDeltas.push(rowDeltas);
     }
 
+    // Row/column background colors (TableRow/TableColumn.backgroundColor).
+    // Written as flat dot-notation keys by update_block's table parameter;
+    // also accept the nested Y.Map layout AFFiNE's model supports.
+    const readRowColumnBackground = (kind: "rows" | "columns", id: string): string | null => {
+      const container = block.get(`prop:${kind}`);
+      if (container instanceof Y.Map) {
+        const bg = mapField(container.get(id), "backgroundColor");
+        if (typeof bg === "string" && bg.length > 0) return bg;
+      }
+      const flat = block.get(`prop:${kind}.${id}.backgroundColor`);
+      return typeof flat === "string" && flat.length > 0 ? flat : null;
+    };
+
     return {
       tableData,
       tableCellDeltas,
       rowIds: rowEntries.map(({ rowId }) => rowId),
       columnIds: columnEntries.map(({ columnId }) => columnId),
       columnWidths: columnEntries.map(({ width }) => width),
+      rowBackgrounds: rowEntries.map(({ rowId }) => readRowColumnBackground("rows", rowId)),
+      columnBackgrounds: columnEntries.map(({ columnId }) => readRowColumnBackground("columns", columnId)),
     };
   }
 
@@ -6297,6 +6314,8 @@ export function registerDocTools(
         tableData?: string[][];
         tableCellDeltas?: TextDelta[][][];
         tableColumnWidths?: Array<number | null>;
+        tableRowBackgrounds?: Array<string | null>;
+        tableColumnBackgrounds?: Array<string | null>;
         linkedDocIds: string[];
         checked: boolean | null;
         collapsed: boolean | null;
@@ -6344,6 +6363,8 @@ export function registerDocTools(
             tableData: table.tableData,
             tableCellDeltas: table.tableCellDeltas,
             tableColumnWidths: table.columnWidths,
+            tableRowBackgrounds: table.rowBackgrounds,
+            tableColumnBackgrounds: table.columnBackgrounds,
           } : {}),
           linkedDocIds,
           checked: typeof checked === "boolean" ? checked : null,
